@@ -41,3 +41,47 @@ def test_git_client_uses_configured_remote():
     assert ["git", "fetch", "upstream", "trunk"] in calls
     assert ["git", "checkout", "-B", "agentic/issue-7", "upstream/trunk"] in calls
     assert ["git", "push", "-u", "upstream", "agentic/issue-7"] in calls
+
+
+def test_git_client_sync_base_fast_forwards_local_base():
+    calls = []
+
+    class FakeRunner:
+        def run(self, args, *, cwd=None, check=True):
+            calls.append(list(args))
+            if args[:3] == ["git", "rev-parse", "--verify"]:
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if args == ["git", "rev-parse", "main"]:
+                return type("Result", (), {"returncode": 0, "stdout": "local\n", "stderr": ""})()
+            if args == ["git", "rev-parse", "origin/main"]:
+                return type("Result", (), {"returncode": 0, "stdout": "remote\n", "stderr": ""})()
+            if args[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if args == ["git", "branch", "--show-current"]:
+                return type("Result", (), {"returncode": 0, "stdout": "feature\n", "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    GitClient(runner=FakeRunner()).sync_base("main")
+    assert ["git", "fetch", "origin", "main"] in calls
+    assert ["git", "branch", "--force", "main", "origin/main"] in calls
+
+
+def test_git_client_sync_base_aborts_when_local_base_diverged():
+    class FakeRunner:
+        def run(self, args, *, cwd=None, check=True):
+            if args[:3] == ["git", "rev-parse", "--verify"]:
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if args == ["git", "rev-parse", "main"]:
+                return type("Result", (), {"returncode": 0, "stdout": "local\n", "stderr": ""})()
+            if args == ["git", "rev-parse", "origin/main"]:
+                return type("Result", (), {"returncode": 0, "stdout": "remote\n", "stderr": ""})()
+            if args[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return type("Result", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    try:
+        GitClient(runner=FakeRunner()).sync_base("main")
+    except RuntimeError as exc:
+        assert "diverged" in str(exc)
+    else:
+        raise AssertionError("diverged base should abort")

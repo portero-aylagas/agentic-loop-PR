@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from agentic_loop.cli import _resolve_issue_file, seed_demo
 from agentic_loop.config import validate_all
 from agentic_loop.controller import Controller
+from agentic_loop.git_client import DiffFile
 from agentic_loop.github_cli import Issue, PullRequest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,17 +49,33 @@ class FakeGitHub:
 
 
 class FakeGit:
-    def __init__(self, dirty=False):
+    def __init__(self, dirty=False, changed_files=None):
         self.dirty = dirty
+        self.changed = list(changed_files or [])
+        self.changed_calls = 0
         self.branches = []
         self.commits = []
         self.pushes = []
+        self.synced_bases = []
 
     def has_changes(self):
         return self.dirty
 
     def checkout_or_create_branch(self, branch, base):
         self.branches.append((branch, base))
+
+    def sync_base(self, base):
+        self.synced_bases.append(base)
+
+    def remote_ref(self, base):
+        return f"origin/{base}"
+
+    def changed_files(self, base):
+        if self.changed and all(isinstance(item, list) for item in self.changed):
+            index = min(self.changed_calls, len(self.changed) - 1)
+            self.changed_calls += 1
+            return self.changed[index]
+        return self.changed
 
     def commit(self, message):
         self.commits.append(message)
@@ -72,9 +89,11 @@ class FakeCodex:
     def __init__(self, reviews):
         self.reviews = list(reviews)
         self.roles = []
+        self.payloads = []
 
     def run_role(self, *, role, prompt_path, schema_path, payload):
         self.roles.append(role)
+        self.payloads.append(payload)
         if role == "planner":
             data = {"summary": "create fixture", "steps": [{"description": "write file", "verify": "run tests"}], "risks": []}
         elif role == "implementer":
@@ -98,7 +117,10 @@ def test_blocking_finding_remediation_rereview_handoff():
     ])
     result = Controller(config=config, github=github, git=git, codex=codex).run(7)
     assert result.decision.kind == "approved"
+    assert git.synced_bases == ["main"]
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator", "reviewer"]
+    assert all(payload["base_ref"] == "main" for payload in codex.payloads)
+    assert all(payload["remote_base_ref"] == "origin/main" for payload in codex.payloads)
     assert git.commits == ["Implement demo fixture", "Remediate demo fixture"]
     assert any("Human handoff" in body for _, body in github.pr_comments_log)
     assert any("Agentic workflow:" in body for _, body in github.issue_comments_log)
@@ -127,6 +149,35 @@ def test_dirty_worktree_aborts_before_github_mutation():
     assert github.issue_comments_log == []
     assert github.created_prs == []
     assert codex.roles == []
+
+
+def test_protected_path_change_hands_off_before_reviewer():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    github = FakeGitHub()
+    git = FakeGit(changed_files=[DiffFile("agentic_loop_assets/schemas/review.schema.json", "M")])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "protected path changed before review"
+    assert codex.roles == ["planner", "implementer"]
+    assert any("Protected path changed" in body for _, body in github.pr_comments_log)
+
+
+def test_protected_path_change_after_remediation_hands_off_before_rereview():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    github = FakeGitHub()
+    git = FakeGit(changed_files=[
+        [],
+        [DiffFile("agentic_loop_assets/schemas/review.schema.json", "M")],
+    ])
+    codex = FakeCodex([
+        {"status": "blocking", "summary": "bad revert", "findings": [{"title": "Remove unrelated changes", "path": "agentic-loop.yaml", "message": "Restore unrelated files from the base branch.", "severity": "medium", "conflicting": False}]},
+        {"status": "approved", "summary": "ok", "findings": []},
+    ])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "protected path changed before review"
+    assert codex.roles == ["planner", "implementer", "reviewer", "remediator"]
 
 
 def test_seed_demo_label_creation_fallback_comment(tmp_path):
