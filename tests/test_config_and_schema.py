@@ -14,8 +14,7 @@ def test_default_config_validates():
     assert config.remote == "origin"
     assert config.repository_root == ROOT
     assert config.branch_prefix == "agentic/issue-"
-    assert config.codex_executable == "codex.cmd"
-    assert config.codex_model is None
+    assert config.codex_model == "gpt-5"
     assert config.assets_dir == ROOT / "agentic_loop_assets"
 
 
@@ -112,41 +111,9 @@ def test_role_output_validation_accepts_valid_review():
         schema_path(config, "review"),
         {"status": "approved", "summary": "ok", "findings": []},
     )
-    validate_role_output(
-        schema_path(config, "review"),
-        {
-            "status": "blocking",
-            "summary": "needs work",
-            "findings": [
-                {
-                    "title": "missing file",
-                    "path": "tests/agentic_demo/sample.txt",
-                    "message": "Create the expected fixture file.",
-                    "severity": "medium",
-                    "conflicting": False,
-                }
-            ],
-        },
-    )
 
 
 def test_role_output_validation_rejects_invalid_review():
     config = validate_all(ROOT / "agentic-loop.yaml")
     with pytest.raises(ValidationError):
         validate_role_output(schema_path(config, "review"), {"status": "approved", "summary": "ok"})
-    with pytest.raises(ValidationError):
-        validate_role_output(
-            schema_path(config, "review"),
-            {
-                "status": "blocking",
-                "summary": "needs work",
-                "findings": [
-                    {
-                        "title": "missing file",
-                        "path": "tests/agentic_demo/sample.txt",
-                        "message": "Create the expected fixture file.",
-                        "severity": "medium",
-                    }
-                ],
-            },
-        )

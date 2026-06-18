@@ -31,7 +31,7 @@ def test_codex_provider_uses_stdin_schema_and_output_file():
     )
     assert result.data["summary"] == "ok"
     assert runner.args[:6] == ["codex", "exec", "--cd", str(ROOT), "--output-schema", str(schema_path(config, "plan"))]
-    assert "--model" not in runner.args
+    assert runner.args[runner.args.index("--model") + 1] == "gpt-5"
     assert runner.args[-1] == "-"
     assert "hello; not shell" in runner.input_text
     assert "hello; not shell" not in runner.args

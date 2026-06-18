@@ -12,7 +12,8 @@ github:
   demo_label: agentic-demo
 
 codex:
-  executable: codex.cmd
+  executable: codex
+  model: gpt-5
   extra_args: []
 
 policy:

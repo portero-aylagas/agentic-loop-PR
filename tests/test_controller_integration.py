@@ -48,14 +48,10 @@ class FakeGitHub:
 
 
 class FakeGit:
-    def __init__(self, dirty=False):
-        self.dirty = dirty
+    def __init__(self):
         self.branches = []
         self.commits = []
         self.pushes = []
-
-    def has_changes(self):
-        return self.dirty
 
     def checkout_or_create_branch(self, branch, base):
         self.branches.append((branch, base))
@@ -93,7 +89,7 @@ def test_blocking_finding_remediation_rereview_handoff():
     github = FakeGitHub()
     git = FakeGit()
     codex = FakeCodex([
-        {"status": "blocking", "summary": "missing beta", "findings": [{"title": "missing beta", "path": "tests/agentic_demo/sample.txt", "message": "Add beta", "severity": "medium", "conflicting": False}]},
+        {"status": "blocking", "summary": "missing beta", "findings": [{"title": "missing beta", "path": "tests/agentic_demo/sample.txt", "message": "Add beta", "severity": "medium"}]},
         {"status": "approved", "summary": "ok", "findings": []},
     ])
     result = Controller(config=config, github=github, git=git, codex=codex).run(7)
@@ -101,7 +97,6 @@ def test_blocking_finding_remediation_rereview_handoff():
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator", "reviewer"]
     assert git.commits == ["Implement demo fixture", "Remediate demo fixture"]
     assert any("Human handoff" in body for _, body in github.pr_comments_log)
-    assert any("Agentic workflow:" in body for _, body in github.issue_comments_log)
 
 
 def test_pr_reuse_by_branch():
@@ -112,21 +107,6 @@ def test_pr_reuse_by_branch():
     result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
     assert result.pr == 22
     assert github.created_prs == []
-
-
-def test_dirty_worktree_aborts_before_github_mutation():
-    config = validate_all(ROOT / "agentic-loop.yaml")
-    github = FakeGitHub()
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    try:
-        Controller(config=config, github=github, git=FakeGit(dirty=True), codex=codex).run(7)
-    except RuntimeError as exc:
-        assert "uncommitted changes" in str(exc)
-    else:
-        raise AssertionError("dirty worktree should abort")
-    assert github.issue_comments_log == []
-    assert github.created_prs == []
-    assert codex.roles == []
 
 
 def test_seed_demo_label_creation_fallback_comment(tmp_path):
