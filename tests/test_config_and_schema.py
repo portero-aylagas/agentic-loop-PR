@@ -14,7 +14,7 @@ def test_default_config_validates():
     assert config.remote == "origin"
     assert config.repository_root == ROOT
     assert config.branch_prefix == "agentic/issue-"
-    assert config.codex_model == "gpt-5"
+    assert config.codex_model is None
     assert config.assets_dir == ROOT / "agentic_loop_assets"
 
 
