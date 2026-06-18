@@ -1,0 +1,3 @@
+recursive-include agentic_loop_assets *.md *.json
+include agentic-loop.yaml
+include demo/issues/*.md
