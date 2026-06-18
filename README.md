@@ -66,6 +66,8 @@ policy:
   max_review_cycles: 2
   max_findings_per_cycle: 25
   stagnant_cycles: 2
+  max_changed_files: 20
+  max_diff_lines: 1000
 
 synthetic_review:
   enabled: false
@@ -87,6 +89,8 @@ Configuration fields:
 - `policy.max_review_cycles`: maximum remediation cycles before handoff.
 - `policy.max_findings_per_cycle`: finding count that forces handoff.
 - `policy.stagnant_cycles`: repeated-finding threshold that forces handoff.
+- `policy.max_changed_files`: optional changed-file limit against `origin/<base_branch>` before handoff. Omit to disable.
+- `policy.max_diff_lines`: optional added-plus-deleted line limit against `origin/<base_branch>` before handoff. Omit to disable.
 - `synthetic_review`: optional test/demo mode that returns configured findings instead of asking Codex to review.
 - `assets_dir`: optional top-level path for custom prompts and schemas. Omit it to use local `agentic_loop_assets` when present, otherwise bundled defaults.
 

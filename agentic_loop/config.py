@@ -62,7 +62,7 @@ class LoopConfig:
 
     @property
     def policy(self) -> dict[str, Any]:
-        return dict(self.data["policy"])
+        return {**DEFAULT_POLICY, **self.data["policy"]}
 
     @property
     def synthetic_review(self) -> dict[str, Any]:
@@ -91,6 +91,11 @@ REQUIRED_SCHEMAS = {
     "implementation": "implementation.schema.json",
     "review": "review.schema.json",
     "remediation": "remediation.schema.json",
+}
+
+DEFAULT_POLICY = {
+    "max_changed_files": 0,
+    "max_diff_lines": 0,
 }
 
 
@@ -177,6 +182,9 @@ def _validate_config_shape(raw: dict[str, Any]) -> None:
     _require_str(github, "demo_label", "github")
     for key in ("max_review_cycles", "max_findings_per_cycle", "stagnant_cycles"):
         if not isinstance(policy.get(key), int) or policy[key] < 1:
+            raise ConfigError(f"policy.{key} must be a positive integer")
+    for key in ("max_changed_files", "max_diff_lines"):
+        if key in policy and (not isinstance(policy[key], int) or policy[key] < 1):
             raise ConfigError(f"policy.{key} must be a positive integer")
     if not isinstance(raw["codex"].get("extra_args", []), list):
         raise ConfigError("codex.extra_args must be a list")

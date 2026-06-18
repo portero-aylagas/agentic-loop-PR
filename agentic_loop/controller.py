@@ -177,6 +177,13 @@ class Controller:
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                     return RunResult(issue.number, branch, pr.number, decision)
+                size_findings = self._diff_size_findings()
+                if size_findings:
+                    decision = PolicyDecision("handoff", "worktree diff exceeds policy limits")
+                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, size_findings, decision.kind, decision.reason)
+                    self._enter_phase(issue.number, "human-review", pr.number)
+                    self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                    return RunResult(issue.number, branch, pr.number, decision)
                 review = self._review(issue, pr, branch, cycle, history)
 
             findings = list(review.get("findings", []))
@@ -279,6 +286,30 @@ class Controller:
                     "conflicting": True,
                 })
         return findings
+
+    def _diff_size_findings(self) -> list[dict[str, Any]]:
+        policy = self.config.policy
+        max_changed_files = int(policy["max_changed_files"])
+        max_diff_lines = int(policy["max_diff_lines"])
+        if max_changed_files < 1 and max_diff_lines < 1:
+            return []
+
+        base = self.git.remote_ref(self.config.base_branch)
+        stats = self.git.diff_stats(base)
+        messages = []
+        if max_changed_files > 0 and stats.changed_files > max_changed_files:
+            messages.append(f"{stats.changed_files} changed files exceeds policy.max_changed_files={max_changed_files}")
+        if max_diff_lines > 0 and stats.diff_lines > max_diff_lines:
+            messages.append(f"{stats.diff_lines} diff lines exceeds policy.max_diff_lines={max_diff_lines}")
+        if not messages:
+            return []
+        return [{
+            "title": "Diff size limit exceeded",
+            "path": "",
+            "message": "; ".join(messages),
+            "severity": "conflict",
+            "conflicting": True,
+        }]
 
     def _post_issue_state(self, issue: int, phase: str, cycle: int, branch: str, pr: int | None) -> None:
         self._enter_phase(issue, phase, pr)

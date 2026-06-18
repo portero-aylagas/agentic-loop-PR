@@ -19,6 +19,8 @@ policy:
   max_review_cycles: 2
   max_findings_per_cycle: 25
   stagnant_cycles: 2
+  max_changed_files: 20
+  max_diff_lines: 1000
 
 synthetic_review:
   enabled: false

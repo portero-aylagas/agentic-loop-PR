@@ -1,13 +1,17 @@
 import subprocess
 
 from agentic_loop.command import CommandRunner
-from agentic_loop.git_client import GitClient, parse_name_status
+from agentic_loop.git_client import GitClient, parse_name_status, parse_numstat_lines
 from agentic_loop.github_cli import GitHubCli
 
 
 def test_parse_name_status():
     parsed = parse_name_status("M\tREADME.md\nA\ttests/demo.py\nR100\told.py\tnew.py\n")
     assert [(item.status, item.path) for item in parsed] == [("M", "README.md"), ("A", "tests/demo.py"), ("R100", "new.py")]
+
+
+def test_parse_numstat_lines():
+    assert parse_numstat_lines("2\t3\tREADME.md\n-\t-\timage.png\n0\t4\ttests/demo.py\n") == 9
 
 
 def test_command_runner_uses_list_args_and_stdin_for_untrusted_text(monkeypatch):

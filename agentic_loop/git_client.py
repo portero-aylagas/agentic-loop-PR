@@ -12,6 +12,12 @@ class DiffFile:
     status: str
 
 
+@dataclass(frozen=True)
+class DiffStats:
+    changed_files: int
+    diff_lines: int
+
+
 class GitClient:
     def __init__(self, runner: CommandRunner | None = None, cwd: str | None = None, remote: str = "origin"):
         self.runner = runner or CommandRunner()
@@ -82,6 +88,11 @@ class GitClient:
         result = self.runner.run(["git", "diff", "--name-status", base], cwd=self.cwd)
         return parse_name_status(result.stdout)
 
+    def diff_stats(self, base: str = "HEAD") -> DiffStats:
+        changed_files = len(self.changed_files(base))
+        result = self.runner.run(["git", "diff", "--numstat", base], cwd=self.cwd)
+        return DiffStats(changed_files=changed_files, diff_lines=parse_numstat_lines(result.stdout))
+
     def has_changes(self) -> bool:
         return bool(self.runner.run(["git", "status", "--porcelain"], cwd=self.cwd).stdout.strip())
 
@@ -118,3 +129,23 @@ def parse_name_status(output: str) -> list[DiffFile]:
         path = parts[-1]
         files.append(DiffFile(path=path, status=status))
     return files
+
+
+def parse_numstat_lines(output: str) -> int:
+    total = 0
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        total += _numstat_value(parts[0])
+        total += _numstat_value(parts[1])
+    return total
+
+
+def _numstat_value(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        return 0

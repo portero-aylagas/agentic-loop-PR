@@ -17,6 +17,8 @@ def test_default_config_validates():
     assert config.codex_executable == "codex.cmd"
     assert config.codex_model is None
     assert config.assets_dir == ROOT / "agentic_loop_assets"
+    assert config.policy["max_changed_files"] == 20
+    assert config.policy["max_diff_lines"] == 1000
 
 
 def test_config_resolves_portable_paths(tmp_path):
@@ -78,6 +80,8 @@ policy:
     config = validate_all(config_file)
     assert config.assets_dir.name == "agentic_loop_assets"
     assert schema_path(config, "review").exists()
+    assert config.policy["max_changed_files"] == 0
+    assert config.policy["max_diff_lines"] == 0
 
 
 def test_config_validation_rejects_bad_policy(tmp_path):
@@ -99,6 +103,34 @@ policy:
   max_review_cycles: 0
   max_findings_per_cycle: 1
   stagnant_cycles: 1
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError):
+        load_config(bad)
+
+
+def test_config_validation_rejects_bad_diff_limits(tmp_path):
+    bad = tmp_path / "agentic-loop.yaml"
+    bad.write_text(
+        """
+repository:
+  root: .
+  remote: origin
+  base_branch: main
+  branch_prefix: agentic/issue-
+  protected_paths: []
+github:
+  ready_label: ready
+  demo_label: demo
+codex:
+  extra_args: []
+policy:
+  max_review_cycles: 1
+  max_findings_per_cycle: 1
+  stagnant_cycles: 1
+  max_changed_files: 0
+  max_diff_lines: many
 """,
         encoding="utf-8",
     )

@@ -2,9 +2,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agentic_loop.cli import _resolve_issue_file, seed_demo
-from agentic_loop.config import validate_all
+from agentic_loop.config import LoopConfig, validate_all
 from agentic_loop.controller import Controller
-from agentic_loop.git_client import DiffFile
+from agentic_loop.git_client import DiffFile, DiffStats
 from agentic_loop.github_cli import Issue, PullRequest
 from agentic_loop.state import WorkflowState, encode_state
 
@@ -79,9 +79,10 @@ class FakeGitHub:
 
 
 class FakeGit:
-    def __init__(self, dirty=False, changed_files=None, cwd=ROOT):
+    def __init__(self, dirty=False, changed_files=None, diff_lines=0, cwd=ROOT):
         self.dirty = dirty
         self.changed = list(changed_files or [])
+        self.diff_lines = diff_lines
         self.changed_calls = 0
         self.cwd = Path(cwd)
         self.prepared_worktrees = []
@@ -91,7 +92,7 @@ class FakeGit:
         self.synced_bases = []
 
     def with_cwd(self, cwd):
-        clone = FakeGit(dirty=self.dirty, changed_files=self.changed, cwd=cwd)
+        clone = FakeGit(dirty=self.dirty, changed_files=self.changed, diff_lines=self.diff_lines, cwd=cwd)
         clone.changed_calls = self.changed_calls
         clone.prepared_worktrees = self.prepared_worktrees
         clone.branches = self.branches
@@ -125,6 +126,17 @@ class FakeGit:
             self.changed_calls += 1
             return self.changed[index]
         return self.changed
+
+    def diff_stats(self, base):
+        changed = self.changed
+        if changed and all(isinstance(item, list) for item in changed):
+            index = min(max(self.changed_calls - 1, 0), len(changed) - 1)
+            changed = changed[index]
+        diff_lines = self.diff_lines
+        if isinstance(diff_lines, list):
+            index = min(max(self.changed_calls - 1, 0), len(diff_lines) - 1)
+            diff_lines = diff_lines[index]
+        return DiffStats(changed_files=len(changed), diff_lines=diff_lines)
 
     def commit(self, message):
         self.commits.append((self.cwd, message))
@@ -164,6 +176,13 @@ class FakeCodex:
         else:
             raise AssertionError(role)
         return SimpleNamespace(data=data)
+
+
+def config_with_policy(**policy):
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
+    data["policy"] = {**data["policy"], **policy}
+    return LoopConfig(config.path, data)
 
 
 def test_blocking_finding_remediation_rereview_handoff():
@@ -325,6 +344,62 @@ def test_protected_path_change_after_remediation_hands_off_before_rereview():
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "protected path changed before review"
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator"]
+
+
+def test_diff_size_within_policy_allows_review():
+    config = config_with_policy(max_changed_files=2, max_diff_lines=10)
+    github = FakeGitHub()
+    git = FakeGit(changed_files=[DiffFile("tests/agentic_demo/sample.txt", "M")], diff_lines=7)
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert codex.roles == ["planner", "implementer", "reviewer"]
+
+
+def test_diff_size_too_many_files_hands_off_before_reviewer():
+    config = config_with_policy(max_changed_files=1, max_diff_lines=100)
+    github = FakeGitHub()
+    git = FakeGit(changed_files=[
+        DiffFile("tests/agentic_demo/one.txt", "M"),
+        DiffFile("tests/agentic_demo/two.txt", "A"),
+    ], diff_lines=5)
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "worktree diff exceeds policy limits"
+    assert codex.roles == ["planner", "implementer"]
+    assert ("add_issue", 7, "agentic:human-review") in github.label_ops
+    assert ("add_pr", 11, "agentic:human-review") in github.label_ops
+    assert any("2 changed files exceeds policy.max_changed_files=1" in body for _, body in github.pr_comments_log)
+
+
+def test_diff_size_too_many_lines_hands_off_before_reviewer():
+    config = config_with_policy(max_changed_files=10, max_diff_lines=5)
+    github = FakeGitHub()
+    git = FakeGit(changed_files=[DiffFile("tests/agentic_demo/sample.txt", "M")], diff_lines=6)
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "worktree diff exceeds policy limits"
+    assert codex.roles == ["planner", "implementer"]
+    assert any("6 diff lines exceeds policy.max_diff_lines=5" in body for _, body in github.pr_comments_log)
+
+
+def test_absent_diff_size_policy_defaults_do_not_limit():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
+    data["policy"].pop("max_changed_files", None)
+    data["policy"].pop("max_diff_lines", None)
+    config = LoopConfig(config.path, data)
+    github = FakeGitHub()
+    git = FakeGit(changed_files=[
+        DiffFile(f"tests/agentic_demo/{index}.txt", "A")
+        for index in range(30)
+    ], diff_lines=2000)
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert codex.roles == ["planner", "implementer", "reviewer"]
 
 
 def test_seed_demo_label_creation_fallback_comment(tmp_path):
