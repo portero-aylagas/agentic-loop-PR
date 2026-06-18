@@ -2,6 +2,7 @@ import subprocess
 
 from agentic_loop.command import CommandRunner
 from agentic_loop.git_client import GitClient, parse_name_status
+from agentic_loop.github_cli import GitHubCli
 
 
 def test_parse_name_status():
@@ -85,3 +86,24 @@ def test_git_client_sync_base_aborts_when_local_base_diverged():
         assert "diverged" in str(exc)
     else:
         raise AssertionError("diverged base should abort")
+
+
+def test_github_cli_label_helpers_use_non_throwing_edit_commands():
+    calls = []
+
+    class FakeRunner:
+        def run(self, args, *, check=True):
+            calls.append((list(args), check))
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    github = GitHubCli(runner=FakeRunner())
+    assert github.add_issue_label(7, "agentic:planning")
+    assert github.remove_issue_label(7, "agentic:implementing")
+    assert github.add_pr_label(11, "agentic:reviewing")
+    assert github.remove_pr_label(11, "agentic:remediating")
+    assert calls == [
+        (["gh", "issue", "edit", "7", "--add-label", "agentic:planning"], False),
+        (["gh", "issue", "edit", "7", "--remove-label", "agentic:implementing"], False),
+        (["gh", "pr", "edit", "11", "--add-label", "agentic:reviewing"], False),
+        (["gh", "pr", "edit", "11", "--remove-label", "agentic:remediating"], False),
+    ]

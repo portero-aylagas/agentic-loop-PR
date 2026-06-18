@@ -11,6 +11,16 @@ from .policy import PolicyDecision, decide_review, protected_path_matches
 from .state import WorkflowState, encode_state
 
 
+PHASE_LABELS = (
+    "agentic:planning",
+    "agentic:implementing",
+    "agentic:reviewing",
+    "agentic:remediating",
+    "agentic:human-review",
+    "agentic:failed",
+)
+
+
 @dataclass(frozen=True)
 class RunResult:
     issue: int
@@ -36,72 +46,82 @@ class Controller:
     def run(self, issue_number: int) -> RunResult:
         if self.git.has_changes():
             raise RuntimeError("working tree has uncommitted changes; commit or stash before running automation")
+        pr: PullRequest | None = None
         issue = self.github.issue_view(issue_number)
-        branch = f"{self.config.branch_prefix}{issue_number}"
-        self.git.sync_base(self.config.base_branch)
-        self.git.checkout_or_create_branch(branch, self.config.base_branch)
-        base_context = _base_context(self.config)
-        self._post_issue_state(issue.number, "planning", 0, branch, None)
+        try:
+            branch = f"{self.config.branch_prefix}{issue_number}"
+            self.git.sync_base(self.config.base_branch)
+            self.git.checkout_or_create_branch(branch, self.config.base_branch)
+            base_context = _base_context(self.config)
+            self._post_issue_state(issue.number, "planning", 0, branch, None)
 
-        plan = self.codex.run_role(
-            role="planner",
-            prompt_path=prompt_path(self.config, "planner"),
-            schema_path=schema_path(self.config, "plan"),
-            payload={"issue": _issue_payload(issue), "branch": branch, **base_context},
-        ).data
-        self._post_issue_state(issue.number, "implementing", 0, branch, None)
-
-        implementation = self.codex.run_role(
-            role="implementer",
-            prompt_path=prompt_path(self.config, "implementer"),
-            schema_path=schema_path(self.config, "implementation"),
-            payload={"issue": _issue_payload(issue), "plan": plan, "branch": branch, **base_context},
-        ).data
-        self.git.commit(str(implementation.get("commit_message", f"Implement issue {issue.number}")))
-        self.git.push_branch(branch)
-
-        pr = self._ensure_pr(issue, branch, plan)
-        self._post_pr_state(pr.number, issue.number, "reviewing", 0, branch, [])
-
-        history: list[list[dict[str, Any]]] = []
-        cycle = 0
-        while True:
-            protected_findings = self._protected_path_findings()
-            if protected_findings:
-                decision = PolicyDecision("handoff", "protected path changed before review")
-                self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, protected_findings, decision.kind)
-                self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
-                return RunResult(issue.number, branch, pr.number, decision)
-            review = self._review(issue, pr, branch, cycle, history)
-            findings = list(review.get("findings", []))
-            decision = decide_review(
-                review=review,
-                cycle=cycle,
-                previous_findings=history,
-                max_review_cycles=int(self.config.policy["max_review_cycles"]),
-                max_findings_per_cycle=int(self.config.policy["max_findings_per_cycle"]),
-                stagnant_cycles=int(self.config.policy["stagnant_cycles"]),
-                protected_paths=self.config.protected_paths,
-            )
-            self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind)
-            if decision.kind == "approved":
-                self.github.comment_pr(pr.number, f"Human handoff: review approved. Automation will not merge. Reason: {decision.reason}")
-                return RunResult(issue.number, branch, pr.number, decision)
-            if decision.kind == "handoff":
-                self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
-                return RunResult(issue.number, branch, pr.number, decision)
-
-            remediation = self.codex.run_role(
-                role="remediator",
-                prompt_path=prompt_path(self.config, "remediator"),
-                schema_path=schema_path(self.config, "remediation"),
-                payload={"issue": _issue_payload(issue), "pr": _pr_payload(pr), "review": review, "branch": branch, **base_context},
+            plan = self.codex.run_role(
+                role="planner",
+                prompt_path=prompt_path(self.config, "planner"),
+                schema_path=schema_path(self.config, "plan"),
+                payload={"issue": _issue_payload(issue), "branch": branch, **base_context},
             ).data
-            self.git.commit(str(remediation.get("commit_message", f"Remediate issue {issue.number}")))
+            self._post_issue_state(issue.number, "implementing", 0, branch, None)
+
+            implementation = self.codex.run_role(
+                role="implementer",
+                prompt_path=prompt_path(self.config, "implementer"),
+                schema_path=schema_path(self.config, "implementation"),
+                payload={"issue": _issue_payload(issue), "plan": plan, "branch": branch, **base_context},
+            ).data
+            self.git.commit(str(implementation.get("commit_message", f"Implement issue {issue.number}")))
             self.git.push_branch(branch)
-            history.append(findings)
-            cycle += 1
-            self._post_pr_state(pr.number, issue.number, "remediated", cycle, branch, findings)
+
+            pr = self._ensure_pr(issue, branch, plan)
+            self._post_pr_state(pr.number, issue.number, "reviewing", 0, branch, [])
+
+            history: list[list[dict[str, Any]]] = []
+            cycle = 0
+            while True:
+                self._enter_phase(issue.number, "reviewing", pr.number)
+                protected_findings = self._protected_path_findings()
+                if protected_findings:
+                    decision = PolicyDecision("handoff", "protected path changed before review")
+                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, protected_findings, decision.kind)
+                    self._enter_phase(issue.number, "human-review", pr.number)
+                    self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                    return RunResult(issue.number, branch, pr.number, decision)
+                review = self._review(issue, pr, branch, cycle, history)
+                findings = list(review.get("findings", []))
+                decision = decide_review(
+                    review=review,
+                    cycle=cycle,
+                    previous_findings=history,
+                    max_review_cycles=int(self.config.policy["max_review_cycles"]),
+                    max_findings_per_cycle=int(self.config.policy["max_findings_per_cycle"]),
+                    stagnant_cycles=int(self.config.policy["stagnant_cycles"]),
+                    protected_paths=self.config.protected_paths,
+                )
+                self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind)
+                if decision.kind == "approved":
+                    self._enter_phase(issue.number, "human-review", pr.number)
+                    self.github.comment_pr(pr.number, f"Human handoff: review approved. Automation will not merge. Reason: {decision.reason}")
+                    return RunResult(issue.number, branch, pr.number, decision)
+                if decision.kind == "handoff":
+                    self._enter_phase(issue.number, "human-review", pr.number)
+                    self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                    return RunResult(issue.number, branch, pr.number, decision)
+
+                self._enter_phase(issue.number, "remediating", pr.number)
+                remediation = self.codex.run_role(
+                    role="remediator",
+                    prompt_path=prompt_path(self.config, "remediator"),
+                    schema_path=schema_path(self.config, "remediation"),
+                    payload={"issue": _issue_payload(issue), "pr": _pr_payload(pr), "review": review, "branch": branch, **base_context},
+                ).data
+                self.git.commit(str(remediation.get("commit_message", f"Remediate issue {issue.number}")))
+                self.git.push_branch(branch)
+                history.append(findings)
+                cycle += 1
+                self._post_pr_state(pr.number, issue.number, "remediated", cycle, branch, findings)
+        except Exception:
+            self._enter_phase(issue.number, "failed", pr.number if pr is not None else None)
+            raise
 
     def _ensure_pr(self, issue: Issue, branch: str, plan: dict[str, Any]) -> PullRequest:
         existing = self.github.find_open_pr_by_branch(branch)
@@ -153,6 +173,7 @@ class Controller:
         return findings
 
     def _post_issue_state(self, issue: int, phase: str, cycle: int, branch: str, pr: int | None) -> None:
+        self._enter_phase(issue, phase, pr)
         state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr)
         self.github.comment_issue(issue, _state_comment(f"Agentic workflow: {phase} on `{branch}`.", state))
 
@@ -166,8 +187,47 @@ class Controller:
         findings: list[dict[str, Any]],
         status: str = "running",
     ) -> None:
+        self._enter_phase(issue, phase, pr)
         state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr, status=status, findings=findings)
         self.github.comment_pr(pr, _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state))
+
+    def _enter_phase(self, issue: int, phase: str, pr: int | None) -> None:
+        label = _phase_label(phase)
+        if label is None:
+            return
+        targets = [("issue", issue)]
+        if pr is not None:
+            targets.append(("pr", pr))
+        for target, number in targets:
+            self._apply_phase_label(target, number, label)
+
+    def _apply_phase_label(self, target: str, number: int, current_label: str) -> None:
+        if not self.github.ensure_label(current_label, description="Agentic workflow phase"):
+            self._comment_label_failure(target, number, f"create label `{current_label}`")
+        for label in PHASE_LABELS:
+            if label == current_label:
+                continue
+            if not self._remove_label(target, number, label):
+                self._comment_label_failure(target, number, f"remove label `{label}`")
+        if not self._add_label(target, number, current_label):
+            self._comment_label_failure(target, number, f"add label `{current_label}`")
+
+    def _add_label(self, target: str, number: int, label: str) -> bool:
+        if target == "issue":
+            return self.github.add_issue_label(number, label)
+        return self.github.add_pr_label(number, label)
+
+    def _remove_label(self, target: str, number: int, label: str) -> bool:
+        if target == "issue":
+            return self.github.remove_issue_label(number, label)
+        return self.github.remove_pr_label(number, label)
+
+    def _comment_label_failure(self, target: str, number: int, action: str) -> None:
+        body = f"Agentic workflow label update failed: could not {action}. Continuing without blocking automation."
+        if target == "issue":
+            self.github.comment_issue(number, body)
+        else:
+            self.github.comment_pr(number, body)
 
 
 def _issue_payload(issue: Issue) -> dict[str, Any]:
@@ -184,3 +244,13 @@ def _base_context(config: LoopConfig) -> dict[str, str]:
 
 def _state_comment(message: str, state: WorkflowState) -> str:
     return f"{message}\n\n{encode_state(state)}"
+
+
+def _phase_label(phase: str) -> str | None:
+    if phase in {"planning", "implementing", "reviewing"}:
+        return f"agentic:{phase}"
+    if phase == "remediating":
+        return "agentic:remediating"
+    if phase in {"human-review", "failed"}:
+        return f"agentic:{phase}"
+    return None
