@@ -7,7 +7,7 @@ from .codex_provider import CodexProvider
 from .config import LoopConfig, prompt_path, schema_path
 from .git_client import GitClient
 from .github_cli import GitHubCli, Issue, PullRequest
-from .policy import PolicyDecision, decide_review
+from .policy import PolicyDecision, decide_review, protected_path_matches
 from .state import WorkflowState, encode_state
 
 
@@ -38,14 +38,16 @@ class Controller:
             raise RuntimeError("working tree has uncommitted changes; commit or stash before running automation")
         issue = self.github.issue_view(issue_number)
         branch = f"{self.config.branch_prefix}{issue_number}"
+        self.git.sync_base(self.config.base_branch)
         self.git.checkout_or_create_branch(branch, self.config.base_branch)
+        base_context = _base_context(self.config)
         self._post_issue_state(issue.number, "planning", 0, branch, None)
 
         plan = self.codex.run_role(
             role="planner",
             prompt_path=prompt_path(self.config, "planner"),
             schema_path=schema_path(self.config, "plan"),
-            payload={"issue": _issue_payload(issue), "branch": branch},
+            payload={"issue": _issue_payload(issue), "branch": branch, **base_context},
         ).data
         self._post_issue_state(issue.number, "implementing", 0, branch, None)
 
@@ -53,7 +55,7 @@ class Controller:
             role="implementer",
             prompt_path=prompt_path(self.config, "implementer"),
             schema_path=schema_path(self.config, "implementation"),
-            payload={"issue": _issue_payload(issue), "plan": plan, "branch": branch},
+            payload={"issue": _issue_payload(issue), "plan": plan, "branch": branch, **base_context},
         ).data
         self.git.commit(str(implementation.get("commit_message", f"Implement issue {issue.number}")))
         self.git.push_branch(branch)
@@ -64,6 +66,12 @@ class Controller:
         history: list[list[dict[str, Any]]] = []
         cycle = 0
         while True:
+            protected_findings = self._protected_path_findings()
+            if protected_findings:
+                decision = PolicyDecision("handoff", "protected path changed before review")
+                self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, protected_findings, decision.kind)
+                self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                return RunResult(issue.number, branch, pr.number, decision)
             review = self._review(issue, pr, branch, cycle, history)
             findings = list(review.get("findings", []))
             decision = decide_review(
@@ -87,7 +95,7 @@ class Controller:
                 role="remediator",
                 prompt_path=prompt_path(self.config, "remediator"),
                 schema_path=schema_path(self.config, "remediation"),
-                payload={"issue": _issue_payload(issue), "pr": _pr_payload(pr), "review": review, "branch": branch},
+                payload={"issue": _issue_payload(issue), "pr": _pr_payload(pr), "review": review, "branch": branch, **base_context},
             ).data
             self.git.commit(str(remediation.get("commit_message", f"Remediate issue {issue.number}")))
             self.git.push_branch(branch)
@@ -120,8 +128,29 @@ class Controller:
             role="reviewer",
             prompt_path=prompt_path(self.config, "reviewer"),
             schema_path=schema_path(self.config, "review"),
-            payload={"issue": _issue_payload(issue), "pr": _pr_payload(pr), "branch": branch, "cycle": cycle, "history": history},
+            payload={
+                "issue": _issue_payload(issue),
+                "pr": _pr_payload(pr),
+                "branch": branch,
+                "cycle": cycle,
+                "history": history,
+                **_base_context(self.config),
+            },
         ).data
+
+    def _protected_path_findings(self) -> list[dict[str, Any]]:
+        base = self.git.remote_ref(self.config.base_branch)
+        findings = []
+        for file in self.git.changed_files(base):
+            if protected_path_matches(file.path, self.config.protected_paths):
+                findings.append({
+                    "title": "Protected path changed",
+                    "path": file.path,
+                    "message": f"`{file.path}` matches repository.protected_paths and requires human review before the automated reviewer runs.",
+                    "severity": "conflict",
+                    "conflicting": True,
+                })
+        return findings
 
     def _post_issue_state(self, issue: int, phase: str, cycle: int, branch: str, pr: int | None) -> None:
         state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr)
@@ -147,6 +176,10 @@ def _issue_payload(issue: Issue) -> dict[str, Any]:
 
 def _pr_payload(pr: PullRequest) -> dict[str, Any]:
     return {"number": pr.number, "url": pr.url, "head_ref": pr.head_ref, "base_ref": pr.base_ref}
+
+
+def _base_context(config: LoopConfig) -> dict[str, str]:
+    return {"base_ref": config.base_branch, "remote_base_ref": f"{config.remote}/{config.base_branch}"}
 
 
 def _state_comment(message: str, state: WorkflowState) -> str:

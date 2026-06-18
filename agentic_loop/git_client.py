@@ -29,6 +29,31 @@ class GitClient:
         self.runner.run(["git", "fetch", self.remote, base], cwd=self.cwd, check=False)
         self.runner.run(["git", "checkout", "-B", branch, f"{self.remote}/{base}"], cwd=self.cwd)
 
+    def remote_ref(self, base: str) -> str:
+        return f"{self.remote}/{base}"
+
+    def sync_base(self, base: str) -> None:
+        remote_ref = self.remote_ref(base)
+        self.runner.run(["git", "fetch", self.remote, base], cwd=self.cwd)
+        exists = self.runner.run(["git", "rev-parse", "--verify", base], cwd=self.cwd, check=False).returncode == 0
+        if not exists:
+            self.runner.run(["git", "branch", base, remote_ref], cwd=self.cwd)
+            return
+
+        local_sha = self.runner.run(["git", "rev-parse", base], cwd=self.cwd).stdout.strip()
+        remote_sha = self.runner.run(["git", "rev-parse", remote_ref], cwd=self.cwd).stdout.strip()
+        if local_sha == remote_sha:
+            return
+
+        can_fast_forward = self.runner.run(["git", "merge-base", "--is-ancestor", base, remote_ref], cwd=self.cwd, check=False).returncode == 0
+        if not can_fast_forward:
+            raise RuntimeError(f"local {base} has diverged from {remote_ref}; resolve it before running automation")
+
+        if self.current_branch() == base:
+            self.runner.run(["git", "merge", "--ff-only", remote_ref], cwd=self.cwd)
+        else:
+            self.runner.run(["git", "branch", "--force", base, remote_ref], cwd=self.cwd)
+
     def changed_files(self, base: str = "HEAD") -> list[DiffFile]:
         result = self.runner.run(["git", "diff", "--name-status", base], cwd=self.cwd)
         return parse_name_status(result.stdout)
