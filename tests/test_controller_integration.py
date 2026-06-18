@@ -71,14 +71,33 @@ class FakeGitHub:
 
 
 class FakeGit:
-    def __init__(self, dirty=False, changed_files=None):
+    def __init__(self, dirty=False, changed_files=None, cwd=ROOT):
         self.dirty = dirty
         self.changed = list(changed_files or [])
         self.changed_calls = 0
+        self.cwd = Path(cwd)
+        self.prepared_worktrees = []
         self.branches = []
         self.commits = []
         self.pushes = []
         self.synced_bases = []
+
+    def with_cwd(self, cwd):
+        clone = FakeGit(dirty=self.dirty, changed_files=self.changed, cwd=cwd)
+        clone.changed_calls = self.changed_calls
+        clone.prepared_worktrees = self.prepared_worktrees
+        clone.branches = self.branches
+        clone.commits = self.commits
+        clone.pushes = self.pushes
+        clone.synced_bases = self.synced_bases
+        return clone
+
+    def prepare_issue_worktree(self, *, issue, branch, base, repo_root):
+        worktree = Path(repo_root) / ".worktrees" / f"agentic-issue-{issue}"
+        self.prepared_worktrees.append((issue, branch, base, worktree))
+        if self.dirty:
+            raise RuntimeError(f"target worktree has uncommitted changes: {worktree}")
+        return worktree
 
     def has_changes(self):
         return self.dirty
@@ -100,22 +119,32 @@ class FakeGit:
         return self.changed
 
     def commit(self, message):
-        self.commits.append(message)
+        self.commits.append((self.cwd, message))
         return True
 
     def push_branch(self, branch):
-        self.pushes.append(branch)
+        self.pushes.append((self.cwd, branch))
 
 
 class FakeCodex:
-    def __init__(self, reviews):
+    def __init__(self, reviews, cwd=ROOT):
         self.reviews = list(reviews)
+        self.cwd = Path(cwd)
         self.roles = []
         self.payloads = []
+        self.cwd_log = []
+
+    def with_cwd(self, cwd):
+        clone = type(self)(self.reviews, cwd=cwd)
+        clone.roles = self.roles
+        clone.payloads = self.payloads
+        clone.cwd_log = self.cwd_log
+        return clone
 
     def run_role(self, *, role, prompt_path, schema_path, payload):
         self.roles.append(role)
         self.payloads.append(payload)
+        self.cwd_log.append(self.cwd)
         if role == "planner":
             data = {"summary": "create fixture", "steps": [{"description": "write file", "verify": "run tests"}], "risks": []}
         elif role == "implementer":
@@ -139,11 +168,14 @@ def test_blocking_finding_remediation_rereview_handoff():
     ])
     result = Controller(config=config, github=github, git=git, codex=codex).run(7)
     assert result.decision.kind == "approved"
-    assert git.synced_bases == ["main"]
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator", "reviewer"]
     assert all(payload["base_ref"] == "main" for payload in codex.payloads)
     assert all(payload["remote_base_ref"] == "origin/main" for payload in codex.payloads)
-    assert git.commits == ["Implement demo fixture", "Remediate demo fixture"]
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    assert git.prepared_worktrees == [(7, "agentic/issue-7", "main", worktree)]
+    assert codex.cwd_log == [worktree, worktree, worktree, worktree, worktree]
+    assert git.commits == [(worktree, "Implement demo fixture"), (worktree, "Remediate demo fixture")]
+    assert git.pushes == [(worktree, "agentic/issue-7"), (worktree, "agentic/issue-7")]
     assert any("Human handoff" in body for _, body in github.pr_comments_log)
     assert any("Agentic workflow:" in body for _, body in github.issue_comments_log)
     assert ("add_issue", 7, "agentic:planning") in github.label_ops
@@ -203,7 +235,7 @@ def test_pr_reuse_by_branch():
     assert github.created_prs == []
 
 
-def test_dirty_worktree_aborts_before_github_mutation():
+def test_dirty_target_worktree_aborts_before_github_mutation():
     config = validate_all(ROOT / "agentic-loop.yaml")
     github = FakeGitHub()
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])

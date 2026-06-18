@@ -18,6 +18,9 @@ class GitClient:
         self.cwd = cwd
         self.remote = remote
 
+    def with_cwd(self, cwd: str | Path) -> GitClient:
+        return GitClient(runner=self.runner, cwd=str(cwd), remote=self.remote)
+
     def current_branch(self) -> str:
         return self.runner.run(["git", "branch", "--show-current"], cwd=self.cwd).stdout.strip()
 
@@ -28,6 +31,27 @@ class GitClient:
             return
         self.runner.run(["git", "fetch", self.remote, base], cwd=self.cwd, check=False)
         self.runner.run(["git", "checkout", "-B", branch, f"{self.remote}/{base}"], cwd=self.cwd)
+
+    def prepare_issue_worktree(self, *, issue: int, branch: str, base: str, repo_root: Path) -> Path:
+        worktree_path = repo_root / ".worktrees" / f"agentic-issue-{issue}"
+        remote_ref = self.remote_ref(base)
+        self.runner.run(["git", "fetch", self.remote, base], cwd=self.cwd)
+        if worktree_path.exists():
+            self._verify_worktree_branch(worktree_path, branch)
+        else:
+            worktree_path.parent.mkdir(parents=True, exist_ok=True)
+            branch_exists = self.runner.run(["git", "rev-parse", "--verify", branch], cwd=self.cwd, check=False).returncode == 0
+            args = ["git", "worktree", "add", str(worktree_path)]
+            if branch_exists:
+                args.append(branch)
+            else:
+                args.extend(["-b", branch, remote_ref])
+            self.runner.run(args, cwd=self.cwd)
+
+        worktree = self.with_cwd(worktree_path)
+        if worktree.has_changes():
+            raise RuntimeError(f"target worktree has uncommitted changes: {worktree_path}")
+        return worktree_path
 
     def remote_ref(self, base: str) -> str:
         return f"{self.remote}/{base}"
@@ -76,6 +100,12 @@ class GitClient:
 
     def repo_root(self) -> Path:
         return Path(self.runner.run(["git", "rev-parse", "--show-toplevel"], cwd=self.cwd).stdout.strip())
+
+    def _verify_worktree_branch(self, worktree_path: Path, branch: str) -> None:
+        self.runner.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=str(worktree_path))
+        current = self.runner.run(["git", "branch", "--show-current"], cwd=str(worktree_path)).stdout.strip()
+        if current != branch:
+            raise RuntimeError(f"target worktree {worktree_path} is on {current!r}, expected {branch!r}")
 
 
 def parse_name_status(output: str) -> list[DiffFile]:
