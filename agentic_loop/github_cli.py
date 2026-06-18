@@ -63,6 +63,18 @@ class GitHubCli:
         )
         return result.returncode == 0 or "already exists" in result.stderr.lower()
 
+    def add_issue_label(self, number: int, label: str) -> bool:
+        return self._edit_label(["gh", "issue", "edit", str(number), "--add-label", label])
+
+    def remove_issue_label(self, number: int, label: str) -> bool:
+        return self._edit_label(["gh", "issue", "edit", str(number), "--remove-label", label], absent_ok=True)
+
+    def add_pr_label(self, number: int, label: str) -> bool:
+        return self._edit_label(["gh", "pr", "edit", str(number), "--add-label", label])
+
+    def remove_pr_label(self, number: int, label: str) -> bool:
+        return self._edit_label(["gh", "pr", "edit", str(number), "--remove-label", label], absent_ok=True)
+
     def find_open_pr_by_branch(self, branch: str) -> PullRequest | None:
         raw = self._json([
             "gh",
@@ -109,6 +121,13 @@ class GitHubCli:
             return json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise CommandError(result) from exc
+
+    def _edit_label(self, args: list[str], *, absent_ok: bool = False) -> bool:
+        result = self.runner.run(args, check=False)
+        if result.returncode == 0:
+            return True
+        stderr = result.stderr.lower()
+        return absent_ok and any(fragment in stderr for fragment in ("not found", "does not exist", "not labeled"))
 
 
 def _number_from_url(text: str) -> int:

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeGitHub:
-    def __init__(self, existing_pr=None, label_results=None):
+    def __init__(self, existing_pr=None, label_results=None, failed_label_ops=None):
         self.issue = Issue(7, "demo", "make a file", "https://example.test/issues/7")
         self.existing_pr = existing_pr
         self.created_prs = []
@@ -19,6 +19,8 @@ class FakeGitHub:
         self.pr_comments_log = []
         self.label_results = list(label_results or [])
         self.created_issue_labels = None
+        self.failed_label_ops = set(failed_label_ops or [])
+        self.label_ops = []
 
     def issue_view(self, number):
         assert number == self.issue.number
@@ -36,12 +38,32 @@ class FakeGitHub:
     def create_pr(self, *, title, body, head, base):
         pr = PullRequest(11, "https://example.test/pull/11", head, base)
         self.created_prs.append((title, body, head, base))
+        self.label_ops.append(("create_pr", pr.number))
         return pr
 
-    def ensure_label(self, name):
+    def ensure_label(self, name, color="6f42c1", description="Agentic loop demo label"):
+        self.label_ops.append(("ensure", name))
+        if ("ensure", name) in self.failed_label_ops:
+            return False
         if self.label_results:
             return self.label_results.pop(0)
         return True
+
+    def add_issue_label(self, number, label):
+        self.label_ops.append(("add_issue", number, label))
+        return ("add_issue", number, label) not in self.failed_label_ops
+
+    def remove_issue_label(self, number, label):
+        self.label_ops.append(("remove_issue", number, label))
+        return ("remove_issue", number, label) not in self.failed_label_ops
+
+    def add_pr_label(self, number, label):
+        self.label_ops.append(("add_pr", number, label))
+        return ("add_pr", number, label) not in self.failed_label_ops
+
+    def remove_pr_label(self, number, label):
+        self.label_ops.append(("remove_pr", number, label))
+        return ("remove_pr", number, label) not in self.failed_label_ops
 
     def create_issue(self, title, body, labels):
         self.created_issue_labels = labels
@@ -49,14 +71,33 @@ class FakeGitHub:
 
 
 class FakeGit:
-    def __init__(self, dirty=False, changed_files=None):
+    def __init__(self, dirty=False, changed_files=None, cwd=ROOT):
         self.dirty = dirty
         self.changed = list(changed_files or [])
         self.changed_calls = 0
+        self.cwd = Path(cwd)
+        self.prepared_worktrees = []
         self.branches = []
         self.commits = []
         self.pushes = []
         self.synced_bases = []
+
+    def with_cwd(self, cwd):
+        clone = FakeGit(dirty=self.dirty, changed_files=self.changed, cwd=cwd)
+        clone.changed_calls = self.changed_calls
+        clone.prepared_worktrees = self.prepared_worktrees
+        clone.branches = self.branches
+        clone.commits = self.commits
+        clone.pushes = self.pushes
+        clone.synced_bases = self.synced_bases
+        return clone
+
+    def prepare_issue_worktree(self, *, issue, branch, base, repo_root):
+        worktree = Path(repo_root) / ".worktrees" / f"agentic-issue-{issue}"
+        self.prepared_worktrees.append((issue, branch, base, worktree))
+        if self.dirty:
+            raise RuntimeError(f"target worktree has uncommitted changes: {worktree}")
+        return worktree
 
     def has_changes(self):
         return self.dirty
@@ -78,22 +119,32 @@ class FakeGit:
         return self.changed
 
     def commit(self, message):
-        self.commits.append(message)
+        self.commits.append((self.cwd, message))
         return True
 
     def push_branch(self, branch):
-        self.pushes.append(branch)
+        self.pushes.append((self.cwd, branch))
 
 
 class FakeCodex:
-    def __init__(self, reviews):
+    def __init__(self, reviews, cwd=ROOT):
         self.reviews = list(reviews)
+        self.cwd = Path(cwd)
         self.roles = []
         self.payloads = []
+        self.cwd_log = []
+
+    def with_cwd(self, cwd):
+        clone = type(self)(self.reviews, cwd=cwd)
+        clone.roles = self.roles
+        clone.payloads = self.payloads
+        clone.cwd_log = self.cwd_log
+        return clone
 
     def run_role(self, *, role, prompt_path, schema_path, payload):
         self.roles.append(role)
         self.payloads.append(payload)
+        self.cwd_log.append(self.cwd)
         if role == "planner":
             data = {"summary": "create fixture", "steps": [{"description": "write file", "verify": "run tests"}], "risks": []}
         elif role == "implementer":
@@ -117,13 +168,61 @@ def test_blocking_finding_remediation_rereview_handoff():
     ])
     result = Controller(config=config, github=github, git=git, codex=codex).run(7)
     assert result.decision.kind == "approved"
-    assert git.synced_bases == ["main"]
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator", "reviewer"]
     assert all(payload["base_ref"] == "main" for payload in codex.payloads)
     assert all(payload["remote_base_ref"] == "origin/main" for payload in codex.payloads)
-    assert git.commits == ["Implement demo fixture", "Remediate demo fixture"]
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    assert git.prepared_worktrees == [(7, "agentic/issue-7", "main", worktree)]
+    assert codex.cwd_log == [worktree, worktree, worktree, worktree, worktree]
+    assert git.commits == [(worktree, "Implement demo fixture"), (worktree, "Remediate demo fixture")]
+    assert git.pushes == [(worktree, "agentic/issue-7"), (worktree, "agentic/issue-7")]
     assert any("Human handoff" in body for _, body in github.pr_comments_log)
     assert any("Agentic workflow:" in body for _, body in github.issue_comments_log)
+    assert ("add_issue", 7, "agentic:planning") in github.label_ops
+    assert ("add_issue", 7, "agentic:implementing") in github.label_ops
+    assert ("add_issue", 7, "agentic:reviewing") in github.label_ops
+    assert ("add_pr", 11, "agentic:reviewing") in github.label_ops
+    assert ("add_issue", 7, "agentic:remediating") in github.label_ops
+    assert ("add_pr", 11, "agentic:remediating") in github.label_ops
+    assert ("add_issue", 7, "agentic:human-review") in github.label_ops
+    assert ("add_pr", 11, "agentic:human-review") in github.label_ops
+
+
+def test_phase_labels_update_issue_only_before_pr_exists():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    github = FakeGitHub()
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    create_pr_index = github.label_ops.index(("create_pr", 11))
+    before_pr_ops = github.label_ops[:create_pr_index]
+    assert ("add_issue", 7, "agentic:planning") in before_pr_ops
+    assert ("add_issue", 7, "agentic:implementing") in before_pr_ops
+    assert not any(op[0] in {"add_pr", "remove_pr"} for op in before_pr_ops)
+
+
+def test_phase_label_permission_failure_posts_visible_comment():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    github = FakeGitHub(failed_label_ops={("add_issue", 7, "agentic:planning")})
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    assert any("label update failed" in body and "add label `agentic:planning`" in body for _, body in github.issue_comments_log)
+
+
+def test_failed_phase_label_is_applied_when_controller_errors_before_pr():
+    class FailingCodex(FakeCodex):
+        def run_role(self, *, role, prompt_path, schema_path, payload):
+            raise RuntimeError("planner failed")
+
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    github = FakeGitHub()
+    try:
+        Controller(config=config, github=github, git=FakeGit(), codex=FailingCodex([])).run(7)
+    except RuntimeError as exc:
+        assert "planner failed" in str(exc)
+    else:
+        raise AssertionError("controller error should propagate")
+    assert ("add_issue", 7, "agentic:failed") in github.label_ops
+    assert not any(op[0] in {"add_pr", "remove_pr"} for op in github.label_ops)
 
 
 def test_pr_reuse_by_branch():
@@ -136,7 +235,7 @@ def test_pr_reuse_by_branch():
     assert github.created_prs == []
 
 
-def test_dirty_worktree_aborts_before_github_mutation():
+def test_dirty_target_worktree_aborts_before_github_mutation():
     config = validate_all(ROOT / "agentic-loop.yaml")
     github = FakeGitHub()
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])

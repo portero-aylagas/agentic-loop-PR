@@ -34,6 +34,15 @@ class CodexProvider:
         self.cwd = cwd
         self.runner = runner or CommandRunner()
 
+    def with_cwd(self, cwd: Path) -> CodexProvider:
+        return CodexProvider(
+            executable=self.executable,
+            model=self.model,
+            extra_args=self.extra_args,
+            cwd=cwd,
+            runner=self.runner,
+        )
+
     def run_role(
         self,
         *,
