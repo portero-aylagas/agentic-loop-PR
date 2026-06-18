@@ -88,6 +88,59 @@ def test_git_client_sync_base_aborts_when_local_base_diverged():
         raise AssertionError("diverged base should abort")
 
 
+def test_git_client_prepares_new_issue_worktree_from_remote_base(tmp_path):
+    calls = []
+
+    class FakeRunner:
+        def run(self, args, *, cwd=None, check=True):
+            calls.append((list(args), cwd, check))
+            if args[:3] == ["git", "rev-parse", "--verify"]:
+                return type("Result", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+            if args[:2] == ["git", "status"]:
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    root = tmp_path / "repo"
+    worktree = GitClient(runner=FakeRunner(), cwd=str(root), remote="upstream").prepare_issue_worktree(
+        issue=7,
+        branch="agentic/issue-7",
+        base="trunk",
+        repo_root=root,
+    )
+    expected = root / ".worktrees" / "agentic-issue-7"
+    assert worktree == expected
+    assert (["git", "fetch", "upstream", "trunk"], str(root), True) in calls
+    assert (["git", "worktree", "add", str(expected), "-b", "agentic/issue-7", "upstream/trunk"], str(root), True) in calls
+    assert (["git", "status", "--porcelain"], str(expected), True) in calls
+
+
+def test_git_client_reuses_clean_issue_worktree_on_expected_branch(tmp_path):
+    calls = []
+
+    class FakeRunner:
+        def run(self, args, *, cwd=None, check=True):
+            calls.append((list(args), cwd, check))
+            if args == ["git", "branch", "--show-current"]:
+                return type("Result", (), {"returncode": 0, "stdout": "agentic/issue-7\n", "stderr": ""})()
+            if args[:2] == ["git", "status"]:
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    root = tmp_path / "repo"
+    expected = root / ".worktrees" / "agentic-issue-7"
+    expected.mkdir(parents=True)
+    worktree = GitClient(runner=FakeRunner(), cwd=str(root)).prepare_issue_worktree(
+        issue=7,
+        branch="agentic/issue-7",
+        base="main",
+        repo_root=root,
+    )
+    assert worktree == expected
+    assert not any(call[0][:3] == ["git", "worktree", "add"] for call in calls)
+    assert (["git", "rev-parse", "--is-inside-work-tree"], str(expected), True) in calls
+    assert (["git", "status", "--porcelain"], str(expected), True) in calls
+
+
 def test_github_cli_label_helpers_use_non_throwing_edit_commands():
     calls = []
 

@@ -44,14 +44,18 @@ class Controller:
         self.codex = codex
 
     def run(self, issue_number: int) -> RunResult:
-        if self.git.has_changes():
-            raise RuntimeError("working tree has uncommitted changes; commit or stash before running automation")
         pr: PullRequest | None = None
+        branch = f"{self.config.branch_prefix}{issue_number}"
+        worktree = self.git.prepare_issue_worktree(
+            issue=issue_number,
+            branch=branch,
+            base=self.config.base_branch,
+            repo_root=self.config.repository_root,
+        )
+        self.git = self.git.with_cwd(worktree)
+        self.codex = self.codex.with_cwd(worktree)
         issue = self.github.issue_view(issue_number)
         try:
-            branch = f"{self.config.branch_prefix}{issue_number}"
-            self.git.sync_base(self.config.base_branch)
-            self.git.checkout_or_create_branch(branch, self.config.base_branch)
             base_context = _base_context(self.config)
             self._post_issue_state(issue.number, "planning", 0, branch, None)
 
