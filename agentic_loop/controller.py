@@ -34,6 +34,8 @@ class Controller:
         self.codex = codex
 
     def run(self, issue_number: int) -> RunResult:
+        if self.git.has_changes():
+            raise RuntimeError("working tree has uncommitted changes; commit or stash before running automation")
         issue = self.github.issue_view(issue_number)
         branch = f"{self.config.branch_prefix}{issue_number}"
         self.git.checkout_or_create_branch(branch, self.config.base_branch)
@@ -122,7 +124,8 @@ class Controller:
         ).data
 
     def _post_issue_state(self, issue: int, phase: str, cycle: int, branch: str, pr: int | None) -> None:
-        self.github.comment_issue(issue, encode_state(WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr)))
+        state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr)
+        self.github.comment_issue(issue, _state_comment(f"Agentic workflow: {phase} on `{branch}`.", state))
 
     def _post_pr_state(
         self,
@@ -134,7 +137,8 @@ class Controller:
         findings: list[dict[str, Any]],
         status: str = "running",
     ) -> None:
-        self.github.comment_pr(pr, encode_state(WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr, status=status, findings=findings)))
+        state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr, status=status, findings=findings)
+        self.github.comment_pr(pr, _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state))
 
 
 def _issue_payload(issue: Issue) -> dict[str, Any]:
@@ -143,3 +147,7 @@ def _issue_payload(issue: Issue) -> dict[str, Any]:
 
 def _pr_payload(pr: PullRequest) -> dict[str, Any]:
     return {"number": pr.number, "url": pr.url, "head_ref": pr.head_ref, "base_ref": pr.base_ref}
+
+
+def _state_comment(message: str, state: WorkflowState) -> str:
+    return f"{message}\n\n{encode_state(state)}"
