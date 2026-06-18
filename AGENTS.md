@@ -5,7 +5,6 @@ This repository is a standalone demo for a Python agentic issue-to-PR loop.
 ## Rules
 
 - Do not commit directly to `main`.
-- Do not merge or enable auto-merge from automation.
 - Keep changes small and demo-focused.
 - Validate with `python -m pytest` and `python -m agentic_loop validate` before handoff.
 
