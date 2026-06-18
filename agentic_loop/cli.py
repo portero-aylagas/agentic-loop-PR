@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="Run the issue-to-PR loop")
     run.add_argument("--issue", type=int, required=True, help="GitHub issue number")
     run.add_argument("--config", dest="command_config", help="Path to agentic-loop.yaml")
+    run.add_argument("--force", action="store_true", help="Ignore terminal workflow state and run again")
 
     seed = subparsers.add_parser("seed-demo", help="Create a fresh demo issue")
     seed.add_argument("--config", dest="command_config", help="Path to agentic-loop.yaml")
@@ -44,8 +45,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "run":
             config = validate_all(config_path)
-            result = run_controller(config, args.issue)
-            print(f"handoff: issue #{result.issue}, PR #{result.pr}, branch {result.branch}, reason: {result.decision.reason}")
+            result = run_controller(config, args.issue, force=args.force)
+            pr = f"PR #{result.pr}" if result.pr is not None else "no PR"
+            print(f"handoff: issue #{result.issue}, {pr}, branch {result.branch}, reason: {result.decision.reason}")
             return 0
     except ConfigError as exc:
         parser.exit(2, f"configuration error: {exc}\n")
@@ -68,7 +70,7 @@ def seed_demo(config, issue_file: Path, github=None):
     return issue
 
 
-def run_controller(config, issue_number: int):
+def run_controller(config, issue_number: int, *, force: bool = False):
     controller = Controller(
         config=config,
         github=GitHubCli(),
@@ -80,7 +82,7 @@ def run_controller(config, issue_number: int):
             cwd=config.repository_root,
         ),
     )
-    return controller.run(issue_number)
+    return controller.run(issue_number, force=force)
 
 
 def _resolve_issue_file(config, issue_file: Path) -> Path:

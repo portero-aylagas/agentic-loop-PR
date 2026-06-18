@@ -20,6 +20,8 @@ class WorkflowState:
     status: str = "running"
     updated_at: str = ""
     findings: list[dict[str, Any]] | None = None
+    validation_results: dict[str, Any] | None = None
+    handoff_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -31,6 +33,8 @@ class WorkflowState:
             "status": self.status,
             "updated_at": self.updated_at or datetime.now(timezone.utc).isoformat(),
             "findings": self.findings or [],
+            "validation_results": self.validation_results or {},
+            "handoff_reason": self.handoff_reason,
         }
         return data
 

@@ -6,17 +6,18 @@ from agentic_loop.config import validate_all
 from agentic_loop.controller import Controller
 from agentic_loop.git_client import DiffFile
 from agentic_loop.github_cli import Issue, PullRequest
+from agentic_loop.state import WorkflowState, encode_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeGitHub:
-    def __init__(self, existing_pr=None, label_results=None, failed_label_ops=None):
+    def __init__(self, existing_pr=None, label_results=None, failed_label_ops=None, issue_comments=None, pr_comments=None):
         self.issue = Issue(7, "demo", "make a file", "https://example.test/issues/7")
         self.existing_pr = existing_pr
         self.created_prs = []
-        self.issue_comments_log = []
-        self.pr_comments_log = []
+        self.issue_comments_log = list(issue_comments or [])
+        self.pr_comments_log = list(pr_comments or [])
         self.label_results = list(label_results or [])
         self.created_issue_labels = None
         self.failed_label_ops = set(failed_label_ops or [])
@@ -25,6 +26,13 @@ class FakeGitHub:
     def issue_view(self, number):
         assert number == self.issue.number
         return self.issue
+
+    def issue_comments(self, number):
+        assert number == self.issue.number
+        return [{"body": body} for _, body in self.issue_comments_log]
+
+    def pr_comments(self, number):
+        return [{"body": body} for _, body in self.pr_comments_log if _ == number]
 
     def comment_issue(self, number, body):
         self.issue_comments_log.append((number, body))
@@ -232,6 +240,46 @@ def test_pr_reuse_by_branch():
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
     result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
     assert result.pr == 22
+    assert github.created_prs == []
+
+
+def test_terminal_state_stops_without_force():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
+    state = WorkflowState(issue=7, phase="human-review", cycle=1, branch="agentic/issue-7", pr=22)
+    github = FakeGitHub(existing_pr=existing, issue_comments=[(7, encode_state(state))])
+    git = FakeGit()
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.pr == 22
+    assert result.decision.kind == "handoff"
+    assert "already terminal" in result.decision.reason
+    assert git.prepared_worktrees == []
+    assert codex.roles == []
+
+
+def test_force_ignores_terminal_state_and_runs():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
+    state = WorkflowState(issue=7, phase="failed", cycle=1, branch="agentic/issue-7", pr=22)
+    github = FakeGitHub(existing_pr=existing, issue_comments=[(7, encode_state(state))])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7, force=True)
+    assert result.pr == 22
+    assert codex.roles == ["planner", "implementer", "reviewer"]
+    assert github.created_prs == []
+
+
+def test_reviewed_state_resumes_at_remediation():
+    config = validate_all(ROOT / "agentic-loop.yaml")
+    existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
+    findings = [{"title": "missing beta", "path": "tests/agentic_demo/sample.txt", "message": "Add beta", "severity": "medium", "conflicting": False}]
+    state = WorkflowState(issue=7, phase="reviewed", cycle=0, branch="agentic/issue-7", pr=22, status="continue", findings=findings)
+    github = FakeGitHub(existing_pr=existing, pr_comments=[(22, encode_state(state))])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    assert result.pr == 22
+    assert codex.roles == ["remediator", "reviewer"]
     assert github.created_prs == []
 
 
