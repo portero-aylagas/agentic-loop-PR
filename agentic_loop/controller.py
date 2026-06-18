@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .codex_provider import CodexProvider
+from .command import CommandRunner
 from .config import LoopConfig, prompt_path, schema_path
 from .git_client import GitClient
 from .github_cli import GitHubCli, Issue, PullRequest
 from .policy import PolicyDecision, decide_review, protected_path_matches
 from .state import WorkflowState, decode_states, encode_state, newest_state
+from .validation import run_validation_commands, validation_comment, validation_failed
 
 
 PHASE_LABELS = (
@@ -94,11 +97,13 @@ class Controller:
         github: GitHubCli,
         git: GitClient,
         codex: CodexProvider,
+        validation_runner: CommandRunner | None = None,
     ):
         self.config = config
         self.github = github
         self.git = git
         self.codex = codex
+        self.validation_runner = validation_runner
 
     def run(self, issue_number: int, *, force: bool = False) -> RunResult:
         resume = self._resume_context(issue_number)
@@ -165,26 +170,38 @@ class Controller:
         history = _review_history(resume.states)
         cycle = resume.next_cycle
         review = resume.review_for_remediation
+        validation_results = _latest_validation_results(resume.states)
+        validation_cycle: int | None = _latest_validation_cycle(resume.states)
         if review is not None and history:
             history = history[:-1]
         while True:
             if review is None:
                 self._enter_phase(issue.number, "reviewing", pr.number)
+                if validation_cycle != cycle:
+                    validation_results = self._run_validation(pr.number)
+                    validation_cycle = cycle
+                if validation_failed(validation_results) and cycle >= int(self.config.policy["max_review_cycles"]):
+                    findings = [_validation_finding(validation_results)]
+                    decision = PolicyDecision("handoff", "validation failed after policy limits")
+                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind, decision.reason, validation_results)
+                    self._enter_phase(issue.number, "human-review", pr.number)
+                    self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                    return RunResult(issue.number, branch, pr.number, decision)
                 protected_findings = self._protected_path_findings()
                 if protected_findings:
                     decision = PolicyDecision("handoff", "protected path changed before review")
-                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, protected_findings, decision.kind, decision.reason)
+                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, protected_findings, decision.kind, decision.reason, validation_results)
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                     return RunResult(issue.number, branch, pr.number, decision)
                 size_findings = self._diff_size_findings()
                 if size_findings:
                     decision = PolicyDecision("handoff", "worktree diff exceeds policy limits")
-                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, size_findings, decision.kind, decision.reason)
+                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, size_findings, decision.kind, decision.reason, validation_results)
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                     return RunResult(issue.number, branch, pr.number, decision)
-                review = self._review(issue, pr, branch, cycle, history)
+                review = self._review(issue, pr, branch, cycle, history, validation_results)
 
             findings = list(review.get("findings", []))
             decision = decide_review(
@@ -196,7 +213,7 @@ class Controller:
                 stagnant_cycles=int(self.config.policy["stagnant_cycles"]),
                 protected_paths=self.config.protected_paths,
             )
-            self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind, decision.reason)
+            self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind, decision.reason, validation_results)
             if decision.kind == "approved":
                 self._enter_phase(issue.number, "human-review", pr.number)
                 self.github.comment_pr(pr.number, f"Human handoff: review approved. Automation will not merge. Reason: {decision.reason}")
@@ -211,13 +228,22 @@ class Controller:
                 role="remediator",
                 prompt_path=prompt_path(self.config, "remediator"),
                 schema_path=schema_path(self.config, "remediation"),
-                payload={"issue": _issue_payload(issue), "pr": _pr_payload(pr), "review": review, "branch": branch, **_base_context(self.config)},
+                payload={
+                    "issue": _issue_payload(issue),
+                    "pr": _pr_payload(pr),
+                    "review": review,
+                    "validation_results": validation_results or {"skipped": True, "passed": True, "commands": []},
+                    "branch": branch,
+                    **_base_context(self.config),
+                },
             ).data
             self.git.commit(str(remediation.get("commit_message", f"Remediate issue {issue.number}")))
             self.git.push_branch(branch)
             history.append(findings)
             cycle += 1
-            self._post_pr_state(pr.number, issue.number, "remediated", cycle, branch, findings)
+            validation_results = self._run_validation(pr.number)
+            validation_cycle = cycle
+            self._post_pr_state(pr.number, issue.number, "remediated", cycle, branch, findings, validation_results=validation_results)
             review = None
 
     def _resume_context(self, issue_number: int) -> ResumeContext:
@@ -254,6 +280,7 @@ class Controller:
         branch: str,
         cycle: int,
         history: list[list[dict[str, Any]]],
+        validation_results: dict[str, Any] | None,
     ) -> dict[str, Any]:
         synthetic = self.config.synthetic_review
         if synthetic.get("enabled"):
@@ -269,6 +296,7 @@ class Controller:
                 "branch": branch,
                 "cycle": cycle,
                 "history": history,
+                "validation_results": validation_results or {"skipped": True, "passed": True, "commands": []},
                 **_base_context(self.config),
             },
         ).data
@@ -311,6 +339,21 @@ class Controller:
             "conflicting": True,
         }]
 
+    def _run_validation(self, pr: int) -> dict[str, Any]:
+        results = run_validation_commands(
+            self.config.validation_commands,
+            cwd=self._validation_cwd(),
+            runner=self.validation_runner,
+        )
+        if not results.get("skipped"):
+            self.github.comment_pr(pr, validation_comment(results))
+        return results
+
+    def _validation_cwd(self) -> Path:
+        if self.git.cwd:
+            return Path(self.git.cwd)
+        return self.config.repository_root
+
     def _post_issue_state(self, issue: int, phase: str, cycle: int, branch: str, pr: int | None) -> None:
         self._enter_phase(issue, phase, pr)
         state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr)
@@ -326,9 +369,20 @@ class Controller:
         findings: list[dict[str, Any]],
         status: str = "running",
         handoff_reason: str = "",
+        validation_results: dict[str, Any] | None = None,
     ) -> None:
         self._enter_phase(issue, phase, pr)
-        state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr, status=status, findings=findings, handoff_reason=handoff_reason)
+        state = WorkflowState(
+            issue=issue,
+            phase=phase,
+            cycle=cycle,
+            branch=branch,
+            pr=pr,
+            status=status,
+            findings=findings,
+            validation_results=validation_results,
+            handoff_reason=handoff_reason,
+        )
         self.github.comment_pr(pr, _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state))
 
     def _enter_phase(self, issue: int, phase: str, pr: int | None) -> None:
@@ -410,6 +464,44 @@ def _latest_continue_review_state(states: list[dict[str, Any]]) -> dict[str, Any
     if not reviewed:
         return None
     return max(reviewed, key=lambda item: (_state_cycle(item), str(item.get("updated_at", ""))))
+
+
+def _latest_validation_results(states: list[dict[str, Any]]) -> dict[str, Any] | None:
+    with_validation = [
+        state for state in states
+        if isinstance(state.get("validation_results"), dict) and state["validation_results"]
+    ]
+    if not with_validation:
+        return None
+    state = max(with_validation, key=lambda item: (_state_cycle(item), str(item.get("updated_at", ""))))
+    return dict(state["validation_results"])
+
+
+def _latest_validation_cycle(states: list[dict[str, Any]]) -> int | None:
+    with_validation = [
+        state for state in states
+        if isinstance(state.get("validation_results"), dict) and state["validation_results"]
+    ]
+    if not with_validation:
+        return None
+    state = max(with_validation, key=lambda item: (_state_cycle(item), str(item.get("updated_at", ""))))
+    return _state_cycle(state)
+
+
+def _validation_finding(validation_results: dict[str, Any] | None) -> dict[str, Any]:
+    failed = [
+        str(command.get("command", "validation command"))
+        for command in (validation_results or {}).get("commands", [])
+        if int(command.get("exit_code", 0)) != 0
+    ]
+    command_text = ", ".join(failed) if failed else "validation command"
+    return {
+        "title": "Validation failed",
+        "path": "",
+        "message": f"Validation remains failing after the configured review policy limit: {command_text}.",
+        "severity": "conflict",
+        "conflicting": True,
+    }
 
 
 def _state_cycle(state: dict[str, Any] | None) -> int:

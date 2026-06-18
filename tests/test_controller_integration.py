@@ -2,11 +2,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agentic_loop.cli import _resolve_issue_file, seed_demo
+from agentic_loop.command import CommandResult
 from agentic_loop.config import LoopConfig, validate_all
 from agentic_loop.controller import Controller
 from agentic_loop.git_client import DiffFile, DiffStats
 from agentic_loop.github_cli import Issue, PullRequest
-from agentic_loop.state import WorkflowState, encode_state
+from agentic_loop.state import WorkflowState, decode_states, encode_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -178,15 +179,42 @@ class FakeCodex:
         return SimpleNamespace(data=data)
 
 
-def config_with_policy(**policy):
+class FakeValidationRunner:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def run(self, args, *, input_text=None, cwd=None, check=True):
+        self.calls.append((list(args), cwd, check))
+        result = self.results.pop(0)
+        return CommandResult(tuple(args), result["returncode"], result.get("stdout", ""), result.get("stderr", ""))
+
+
+def config_without_validation():
     config = validate_all(ROOT / "agentic-loop.yaml")
+    data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
+    data.pop("validation", None)
+    return LoopConfig(config.path, data)
+
+
+def config_with_policy(**policy):
+    config = config_without_validation()
     data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
     data["policy"] = {**data["policy"], **policy}
     return LoopConfig(config.path, data)
 
 
+def config_with_validation(commands, **policy):
+    config = config_without_validation()
+    data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
+    data["validation"] = {"commands": commands}
+    if policy:
+        data["policy"] = {**data["policy"], **policy}
+    return LoopConfig(config.path, data)
+
+
 def test_blocking_finding_remediation_rereview_handoff():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit()
     codex = FakeCodex([
@@ -216,7 +244,7 @@ def test_blocking_finding_remediation_rereview_handoff():
 
 
 def test_phase_labels_update_issue_only_before_pr_exists():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     github = FakeGitHub()
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
     Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
@@ -228,7 +256,7 @@ def test_phase_labels_update_issue_only_before_pr_exists():
 
 
 def test_phase_label_permission_failure_posts_visible_comment():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     github = FakeGitHub(failed_label_ops={("add_issue", 7, "agentic:planning")})
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
     Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
@@ -240,7 +268,7 @@ def test_failed_phase_label_is_applied_when_controller_errors_before_pr():
         def run_role(self, *, role, prompt_path, schema_path, payload):
             raise RuntimeError("planner failed")
 
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     github = FakeGitHub()
     try:
         Controller(config=config, github=github, git=FakeGit(), codex=FailingCodex([])).run(7)
@@ -253,7 +281,7 @@ def test_failed_phase_label_is_applied_when_controller_errors_before_pr():
 
 
 def test_pr_reuse_by_branch():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
     github = FakeGitHub(existing_pr=existing)
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
@@ -263,7 +291,7 @@ def test_pr_reuse_by_branch():
 
 
 def test_terminal_state_stops_without_force():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
     state = WorkflowState(issue=7, phase="human-review", cycle=1, branch="agentic/issue-7", pr=22)
     github = FakeGitHub(existing_pr=existing, issue_comments=[(7, encode_state(state))])
@@ -278,7 +306,7 @@ def test_terminal_state_stops_without_force():
 
 
 def test_force_ignores_terminal_state_and_runs():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
     state = WorkflowState(issue=7, phase="failed", cycle=1, branch="agentic/issue-7", pr=22)
     github = FakeGitHub(existing_pr=existing, issue_comments=[(7, encode_state(state))])
@@ -290,7 +318,7 @@ def test_force_ignores_terminal_state_and_runs():
 
 
 def test_reviewed_state_resumes_at_remediation():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
     findings = [{"title": "missing beta", "path": "tests/agentic_demo/sample.txt", "message": "Add beta", "severity": "medium", "conflicting": False}]
     state = WorkflowState(issue=7, phase="reviewed", cycle=0, branch="agentic/issue-7", pr=22, status="continue", findings=findings)
@@ -303,7 +331,7 @@ def test_reviewed_state_resumes_at_remediation():
 
 
 def test_dirty_target_worktree_aborts_before_github_mutation():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     github = FakeGitHub()
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
     try:
@@ -318,7 +346,7 @@ def test_dirty_target_worktree_aborts_before_github_mutation():
 
 
 def test_protected_path_change_hands_off_before_reviewer():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit(changed_files=[DiffFile("agentic_loop_assets/schemas/review.schema.json", "M")])
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
@@ -330,7 +358,7 @@ def test_protected_path_change_hands_off_before_reviewer():
 
 
 def test_protected_path_change_after_remediation_hands_off_before_rereview():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit(changed_files=[
         [],
@@ -386,7 +414,7 @@ def test_diff_size_too_many_lines_hands_off_before_reviewer():
 
 
 def test_absent_diff_size_policy_defaults_do_not_limit():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
     data["policy"].pop("max_changed_files", None)
     data["policy"].pop("max_diff_lines", None)
@@ -402,8 +430,87 @@ def test_absent_diff_size_policy_defaults_do_not_limit():
     assert codex.roles == ["planner", "implementer", "reviewer"]
 
 
+def test_validation_success_posts_comment_and_reaches_reviewer():
+    config = config_with_validation(["python -m pytest"])
+    github = FakeGitHub()
+    runner = FakeValidationRunner([{"returncode": 0, "stdout": "ok\n"}])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    assert result.decision.kind == "approved"
+    assert runner.calls == [(["python", "-m", "pytest"], str(worktree), False)]
+    assert any("Validation passed: 1 command(s)." in body for _, body in github.pr_comments_log)
+    reviewer_payload = codex.payloads[codex.roles.index("reviewer")]
+    assert reviewer_payload["validation_results"]["passed"] is True
+    assert reviewer_payload["validation_results"]["commands"][0]["stdout"] == "ok\n"
+
+
+def test_validation_failure_is_included_in_reviewer_and_remediator_payloads():
+    config = config_with_validation(["python -m pytest"])
+    github = FakeGitHub()
+    runner = FakeValidationRunner([
+        {"returncode": 1, "stdout": "failed\n", "stderr": "boom\n"},
+        {"returncode": 0, "stdout": "fixed\n"},
+    ])
+    codex = FakeCodex([
+        {"status": "blocking", "summary": "tests fail", "findings": [{"title": "fix tests", "path": "tests/test_demo.py", "message": "Make validation pass.", "severity": "medium", "conflicting": False}]},
+        {"status": "approved", "summary": "ok", "findings": []},
+    ])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    assert result.decision.kind == "approved"
+    reviewer_payload = codex.payloads[codex.roles.index("reviewer")]
+    remediator_payload = codex.payloads[codex.roles.index("remediator")]
+    assert reviewer_payload["validation_results"]["passed"] is False
+    assert reviewer_payload["validation_results"]["commands"][0]["stderr"] == "boom\n"
+    assert remediator_payload["validation_results"]["passed"] is False
+    assert any("Validation failed: 1 command(s)." in body for _, body in github.pr_comments_log)
+
+
+def test_validation_skips_when_commands_absent():
+    config = config_without_validation()
+    github = FakeGitHub()
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert not any("Validation " in body for _, body in github.pr_comments_log)
+    reviewer_payload = codex.payloads[codex.roles.index("reviewer")]
+    assert reviewer_payload["validation_results"] == {"skipped": True, "passed": True, "commands": []}
+
+
+def test_validation_results_are_encoded_in_pr_state():
+    config = config_with_validation(["python -m pytest"])
+    github = FakeGitHub()
+    runner = FakeValidationRunner([{"returncode": 0, "stdout": "ok\n"}])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    states = []
+    for _, body in github.pr_comments_log:
+        states.extend(decode_states(body))
+    reviewed = [state for state in states if state.get("phase") == "reviewed"]
+    assert reviewed[-1]["validation_results"]["commands"][0]["command"] == "python -m pytest"
+    assert reviewed[-1]["validation_results"]["commands"][0]["exit_code"] == 0
+
+
+def test_failing_validation_hands_off_after_review_policy_limit():
+    config = config_with_validation(["python -m pytest"], max_review_cycles=1)
+    github = FakeGitHub()
+    runner = FakeValidationRunner([
+        {"returncode": 1, "stderr": "first failure\n"},
+        {"returncode": 1, "stderr": "still failing\n"},
+    ])
+    codex = FakeCodex([
+        {"status": "blocking", "summary": "tests fail", "findings": [{"title": "fix tests", "path": "tests/test_demo.py", "message": "Make validation pass.", "severity": "medium", "conflicting": False}]},
+        {"status": "approved", "summary": "ok", "findings": []},
+    ])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "validation failed after policy limits"
+    assert codex.roles == ["planner", "implementer", "reviewer", "remediator"]
+    assert ("add_pr", 11, "agentic:human-review") in github.label_ops
+
+
 def test_seed_demo_label_creation_fallback_comment(tmp_path):
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("demo body", encoding="utf-8")
     github = FakeGitHub(label_results=[True, False])
@@ -414,6 +521,6 @@ def test_seed_demo_label_creation_fallback_comment(tmp_path):
 
 
 def test_issue_file_resolves_relative_to_repository_root():
-    config = validate_all(ROOT / "agentic-loop.yaml")
+    config = config_without_validation()
     issue_file = _resolve_issue_file(config, Path("demo/issues/isolated_text_fixture.md"))
     assert issue_file == ROOT / "demo/issues/isolated_text_fixture.md"

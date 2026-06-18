@@ -69,6 +69,13 @@ class LoopConfig:
         return dict(self.data.get("synthetic_review", {}))
 
     @property
+    def validation_commands(self) -> list[str]:
+        validation = self.data.get("validation", {})
+        if not isinstance(validation, dict):
+            return []
+        return [str(command) for command in validation.get("commands", [])]
+
+    @property
     def assets_dir(self) -> Path:
         configured = self.data.get("assets_dir")
         if configured:
@@ -178,6 +185,12 @@ def _validate_config_shape(raw: dict[str, Any]) -> None:
         raise ConfigError("repository.protected_paths must be a list")
     if "assets_dir" in raw and (not isinstance(raw["assets_dir"], str) or not raw["assets_dir"].strip()):
         raise ConfigError("assets_dir must be a non-empty string")
+    if "validation" in raw:
+        if not isinstance(raw["validation"], dict):
+            raise ConfigError("validation must be a mapping")
+        commands = raw["validation"].get("commands", [])
+        if not isinstance(commands, list) or any(not isinstance(command, str) or not command.strip() for command in commands):
+            raise ConfigError("validation.commands must be a list of non-empty strings")
     _require_str(github, "ready_label", "github")
     _require_str(github, "demo_label", "github")
     for key in ("max_review_cycles", "max_findings_per_cycle", "stagnant_cycles"):

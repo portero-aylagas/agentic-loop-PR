@@ -22,6 +22,11 @@ policy:
   max_changed_files: 20
   max_diff_lines: 1000
 
+validation:
+  commands:
+    - python -m pytest
+    - python -m agentic_loop validate
+
 synthetic_review:
   enabled: false
   findings: []

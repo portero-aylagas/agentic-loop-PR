@@ -3,6 +3,7 @@ import subprocess
 from agentic_loop.command import CommandRunner
 from agentic_loop.git_client import GitClient, parse_name_status, parse_numstat_lines
 from agentic_loop.github_cli import GitHubCli
+from agentic_loop.validation import parse_command
 
 
 def test_parse_name_status():
@@ -28,6 +29,11 @@ def test_command_runner_uses_list_args_and_stdin_for_untrusted_text(monkeypatch)
     assert calls["args"] == ["codex", "exec", "-"]
     assert calls["kwargs"]["input"] == untrusted
     assert calls["kwargs"]["shell"] is False
+
+
+def test_validation_command_parser_returns_argv():
+    assert parse_command("python -m pytest") == ["python", "-m", "pytest"]
+    assert parse_command('"C:\\Program Files\\Python\\python.exe" -m pytest') == ["C:\\Program Files\\Python\\python.exe", "-m", "pytest"]
 
 
 def test_git_client_uses_configured_remote():

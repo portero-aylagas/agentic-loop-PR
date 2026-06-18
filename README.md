@@ -69,6 +69,11 @@ policy:
   max_changed_files: 20
   max_diff_lines: 1000
 
+validation:
+  commands:
+    - python -m pytest
+    - python -m agentic_loop validate
+
 synthetic_review:
   enabled: false
   findings: []
@@ -91,6 +96,7 @@ Configuration fields:
 - `policy.stagnant_cycles`: repeated-finding threshold that forces handoff.
 - `policy.max_changed_files`: optional changed-file limit against `origin/<base_branch>` before handoff. Omit to disable.
 - `policy.max_diff_lines`: optional added-plus-deleted line limit against `origin/<base_branch>` before handoff. Omit to disable.
+- `validation.commands`: optional project checks run after implementation and after each remediation. Commands are parsed into argv and run without a shell. Omit or leave empty to skip validation.
 - `synthetic_review`: optional test/demo mode that returns configured findings instead of asking Codex to review.
 - `assets_dir`: optional top-level path for custom prompts and schemas. Omit it to use local `agentic_loop_assets` when present, otherwise bundled defaults.
 
