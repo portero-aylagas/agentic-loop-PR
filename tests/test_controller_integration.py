@@ -6,6 +6,7 @@ from agentic_loop.controller import Controller
 from agentic_loop.git_client import DiffFile, DiffStats, StatusFile
 from agentic_loop.github_cli import Issue, PullRequest
 from agentic_loop.provider import RoleResult
+from agentic_loop.roles import AUTOMATED_COMMENT_FOOTER, role_display
 from agentic_loop.state import WorkflowState, decode_states, encode_state
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -336,6 +337,15 @@ def test_blocking_finding_remediation_rereview_handoff():
     ]
     assert any("Human handoff" in body for _, body in github.pr_comments_log)
     assert any("Agentic workflow:" in body for _, body in github.issue_comments_log)
+    assert any(body.startswith(f"{role_display('planner')}: Agentic workflow: planning") for _, body in github.issue_comments_log)
+    assert any(body.startswith(f"{role_display('implementer')}: Agentic workflow: implementing") for _, body in github.issue_comments_log)
+    assert any(body.startswith(f"{role_display('reviewer')}: Agentic workflow: reviewed") for _, body in github.pr_comments_log)
+    assert any(body.startswith(f"{role_display('remediator')}: Agentic workflow: remediated") for _, body in github.pr_comments_log)
+    assert any(body.startswith(f"{role_display('orchestrator')}: Human handoff") for _, body in github.pr_comments_log)
+    assert all(
+        body.endswith(AUTOMATED_COMMENT_FOOTER)
+        for _, body in [*github.issue_comments_log, *github.pr_comments_log]
+    )
     assert ("add_issue", 7, "agentic:planning") in github.label_ops
     assert ("add_issue", 7, "agentic:implementing") in github.label_ops
     assert ("add_issue", 7, "agentic:reviewing") in github.label_ops
@@ -731,6 +741,11 @@ def test_validation_success_posts_comment_and_reaches_reviewer():
     assert result.decision.kind == "approved"
     assert runner.calls == [(["python", "-m", "pytest"], str(worktree), False)]
     assert any("Validation passed: 1 command(s)." in body for _, body in github.pr_comments_log)
+    assert any(
+        body.startswith(f"{role_display('orchestrator')}: Validation passed: 1 command(s).")
+        and body.endswith(AUTOMATED_COMMENT_FOOTER)
+        for _, body in github.pr_comments_log
+    )
     reviewer_payload = codex.payloads[codex.roles.index("reviewer")]
     assert reviewer_payload["validation_results"]["passed"] is True
     assert reviewer_payload["validation_results"]["commands"][0]["stdout"] == "ok\n"
@@ -814,6 +829,8 @@ def test_seed_demo_label_creation_fallback_comment(tmp_path):
     assert github.created_issue_labels == [config.ready_label]
     assert "could not create label" in github.issue_comments_log[0][1]
     assert "Manual action: create the label in GitHub and add it to this issue if needed." in github.issue_comments_log[0][1]
+    assert github.issue_comments_log[0][1].startswith(f"{role_display('orchestrator')}: Label update failed")
+    assert github.issue_comments_log[0][1].endswith(AUTOMATED_COMMENT_FOOTER)
 
 
 def test_issue_file_resolves_relative_to_repository_root():

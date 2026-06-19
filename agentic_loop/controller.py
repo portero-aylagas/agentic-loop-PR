@@ -11,6 +11,7 @@ from .github_cli import GitHubCli, Issue, PullRequest
 from .policy import PolicyDecision, decide_review, protected_path_matches
 from .provider import RoleProvider
 from .pr_status import extract_status_value, upsert_status_section
+from .roles import automated_comment
 from .state import WorkflowState, decode_states, encode_state, newest_state
 from .validation import run_validation_commands, validation_comment, validation_failed
 
@@ -135,7 +136,7 @@ class Controller:
                 if handoff is not None:
                     self._enter_phase(issue.number, "human-review", pr.number if pr is not None else None)
                     if pr is not None:
-                        self.github.comment_pr(pr.number, f"Human handoff required. Reason: {handoff.reason}")
+                        self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {handoff.reason}"))
                     return RunResult(issue.number, branch, pr.number if pr is not None else None, handoff)
                 resume = ResumeContext(branch=branch, pr=pr, state=None, states=[])
                 self._post_pr_state(pr.number, issue.number, "reviewing", 0, branch, [])
@@ -146,7 +147,7 @@ class Controller:
             if completed is not None:
                 self._enter_phase(issue.number, "human-review", pr.number)
                 self._refresh_pr_status(pr.number, issue.number, "human-review", resume.next_cycle, branch, handoff_status=completed.reason)
-                self.github.comment_pr(pr.number, f"Human handoff required. Reason: {completed.reason}")
+                self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {completed.reason}"))
                 return RunResult(issue.number, branch, pr.number, completed)
 
             return self._review_loop(issue, pr, branch, resume)
@@ -220,7 +221,7 @@ class Controller:
                     )
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
-                    self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                    self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {decision.reason}"))
                     return RunResult(issue.number, branch, pr.number, decision)
                 protected_findings = self._protected_path_findings()
                 if protected_findings:
@@ -240,7 +241,7 @@ class Controller:
                     )
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
-                    self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                    self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {decision.reason}"))
                     return RunResult(issue.number, branch, pr.number, decision)
                 size_findings = self._diff_size_findings()
                 if size_findings:
@@ -260,7 +261,7 @@ class Controller:
                     )
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
-                    self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                    self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {decision.reason}"))
                     return RunResult(issue.number, branch, pr.number, decision)
                 review = self._review(issue, pr, branch, cycle, history, validation_results)
                 review_invocation_count += 1
@@ -292,12 +293,12 @@ class Controller:
             if decision.kind == "approved":
                 self._enter_phase(issue.number, "human-review", pr.number)
                 self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, review_summary=str(review.get("summary", "")), handoff_status=decision.reason)
-                self.github.comment_pr(pr.number, f"Human handoff: review approved. Automation will not merge. Reason: {decision.reason}")
+                self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff: review approved. Automation will not merge. Reason: {decision.reason}"))
                 return RunResult(issue.number, branch, pr.number, decision)
             if decision.kind == "handoff":
                 self._enter_phase(issue.number, "human-review", pr.number)
                 self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, review_summary=str(review.get("summary", "")), handoff_status=decision.reason)
-                self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
+                self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {decision.reason}"))
                 return RunResult(issue.number, branch, pr.number, decision)
 
             self._enter_phase(issue.number, "remediating", pr.number)
@@ -338,7 +339,7 @@ class Controller:
                 )
                 self._enter_phase(issue.number, "human-review", pr.number)
                 self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=staging_decision.reason)
-                self.github.comment_pr(pr.number, f"Human handoff required. Reason: {staging_decision.reason}")
+                self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {staging_decision.reason}"))
                 return RunResult(issue.number, branch, pr.number, staging_decision)
             history.append(findings)
             cycle += 1
@@ -500,7 +501,7 @@ class Controller:
         return None
 
     def _staging_handoff(self, issue: int, role: str, message: str, reason: str | None = None) -> PolicyDecision:
-        self.github.comment_issue(issue, f"Human handoff required after {role}: {message}")
+        self.github.comment_issue(issue, automated_comment(role, f"Human handoff required after {role}: {message}"))
         return PolicyDecision("handoff", reason or message)
 
     def _run_validation(self, pr: int) -> dict[str, Any]:
@@ -510,7 +511,7 @@ class Controller:
             runner=self.validation_runner,
         )
         if not results.get("skipped"):
-            self.github.comment_pr(pr, validation_comment(results))
+            self.github.comment_pr(pr, _orchestrator_comment(validation_comment(results)))
         return results
 
     def _validation_cwd(self) -> Path:
@@ -528,7 +529,7 @@ class Controller:
             pr=pr,
             model_provider=self._model_provider_identity(),
         )
-        self.github.comment_issue(issue, _state_comment(f"Agentic workflow: {phase} on `{branch}`.", state))
+        self.github.comment_issue(issue, automated_comment(_role_for_phase(phase), _state_comment(f"Agentic workflow: {phase} on `{branch}`.", state)))
 
     def _post_pr_state(
         self,
@@ -568,7 +569,7 @@ class Controller:
             ),
             model_provider=self._model_provider_identity(),
         )
-        self.github.comment_pr(pr, _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state))
+        self.github.comment_pr(pr, automated_comment(_role_for_phase(phase), _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state)))
         self._refresh_pr_status(
             pr,
             issue,
@@ -683,6 +684,7 @@ class Controller:
             f"Manual action: {_label_manual_action(action, label, target, number)} "
             "Continuing without blocking automation."
         )
+        body = _orchestrator_comment(body)
         if target == "issue":
             self.github.comment_issue(number, body)
         else:
@@ -745,6 +747,22 @@ def _reported_path_matches_dirty_path(reported: str, dirty_path: str) -> bool:
 
 def _state_comment(message: str, state: WorkflowState) -> str:
     return f"{message}\n\n{encode_state(state)}"
+
+
+def _orchestrator_comment(body: str) -> str:
+    return automated_comment("orchestrator", body)
+
+
+def _role_for_phase(phase: str) -> str:
+    if phase == "planning":
+        return "planner"
+    if phase == "implementing":
+        return "implementer"
+    if phase in {"reviewing", "reviewed"}:
+        return "reviewer"
+    if phase in {"remediating", "remediated"}:
+        return "remediator"
+    return "orchestrator"
 
 
 def _states_from_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:

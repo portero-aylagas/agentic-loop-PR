@@ -257,6 +257,15 @@ The assets are prompt and JSON schema files that define the Codex role contract:
 - `agentic_loop_assets/schemas/review.schema.json`
 - `agentic_loop_assets/schemas/remediation.schema.json`
 
+The workflow uses stable emoji labels at the start of user-visible automated
+comments so readers can tell which agent is speaking:
+
+- 🧠 Orchestrator: controller-owned workflow, validation, labels, and handoff.
+- 🧑‍💼📝 Planner: issue analysis and implementation planning.
+- 🧑‍💻🛠️ Implementer: code and test changes from the plan.
+- 🕵️🔎 Reviewer: review results and blocking findings.
+- 🧑‍⚕️💊 Remediator: focused fixes for reviewer findings.
+
 Use the bundled defaults first. Copy and customize assets only when you need to
 change role instructions or output shape. If schemas are customized, keep them
 compatible with the controller fields it reads, including review `status`,
