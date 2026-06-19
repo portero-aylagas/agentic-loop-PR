@@ -20,6 +20,7 @@ def test_default_config_validates():
     assert config.policy["max_changed_files"] == 20
     assert config.policy["max_diff_lines"] == 1000
     assert config.validation_commands == ["python -m pytest", "python -m agentic_loop validate"]
+    assert config.trace == {"mode": "committed", "artifact_dir": "agentic-loop-traces"}
 
 
 def test_config_resolves_portable_paths(tmp_path):
@@ -162,6 +163,35 @@ policy:
 validation:
   commands:
     - ""
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError):
+        load_config(bad)
+
+
+def test_config_validation_rejects_bad_trace(tmp_path):
+    bad = tmp_path / "agentic-loop.yaml"
+    bad.write_text(
+        """
+repository:
+  root: .
+  remote: origin
+  base_branch: main
+  branch_prefix: agentic/issue-
+  protected_paths: []
+github:
+  ready_label: ready
+  demo_label: demo
+codex:
+  extra_args: []
+policy:
+  max_review_cycles: 1
+  max_findings_per_cycle: 1
+  stagnant_cycles: 1
+trace:
+  mode: noisy
+  artifact_dir: ../traces
 """,
         encoding="utf-8",
     )

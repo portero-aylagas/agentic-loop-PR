@@ -25,6 +25,7 @@ class WorkflowState:
     review_invocation_count: int = 0
     remediation_attempt_count: int = 0
     model_provider: dict[str, Any] | None = None
+    trace_artifact: str = ""
     timestamp: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -44,6 +45,7 @@ class WorkflowState:
             "validation_results": self.validation_results or {},
             "handoff_reason": self.handoff_reason,
             "model_provider": self.model_provider or {},
+            "trace_artifact": self.trace_artifact,
         }
         return data
 

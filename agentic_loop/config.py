@@ -76,6 +76,10 @@ class LoopConfig:
         return [str(command) for command in validation.get("commands", [])]
 
     @property
+    def trace(self) -> dict[str, Any]:
+        return {"mode": "off", "artifact_dir": "agentic-loop-traces", **dict(self.data.get("trace", {}))}
+
+    @property
     def assets_dir(self) -> Path:
         configured = self.data.get("assets_dir")
         if configured:
@@ -191,6 +195,18 @@ def _validate_config_shape(raw: dict[str, Any]) -> None:
         commands = raw["validation"].get("commands", [])
         if not isinstance(commands, list) or any(not isinstance(command, str) or not command.strip() for command in commands):
             raise ConfigError("validation.commands must be a list of non-empty strings")
+    if "trace" in raw:
+        if not isinstance(raw["trace"], dict):
+            raise ConfigError("trace must be a mapping")
+        mode = raw["trace"].get("mode", "off")
+        if mode not in {"off", "committed"}:
+            raise ConfigError("trace.mode must be either 'off' or 'committed'")
+        artifact_dir = raw["trace"].get("artifact_dir", "agentic-loop-traces")
+        if not isinstance(artifact_dir, str) or not artifact_dir.strip():
+            raise ConfigError("trace.artifact_dir must be a non-empty string")
+        normalized = artifact_dir.strip().replace("\\", "/")
+        if normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
+            raise ConfigError("trace.artifact_dir must be a safe relative path")
     _require_str(github, "ready_label", "github")
     _require_str(github, "demo_label", "github")
     for key in ("max_review_cycles", "max_findings_per_cycle", "stagnant_cycles"):
