@@ -9,6 +9,7 @@ def test_status_section_is_created():
             "phase": "reviewing",
             "branch": "agentic/issue-7",
             "plan_summary": "create fixture",
+            "trace_artifact": "agentic-loop-traces/issue-7.md",
             "validation_results": {"skipped": False, "passed": True, "commands": []},
             "review_summary": "looks good",
             "remediation_count": 1,
@@ -19,6 +20,7 @@ def test_status_section_is_created():
     assert START_MARKER in body
     assert END_MARKER in body
     assert "- Source issue: #7" in body
+    assert "- Trace artifact: agentic-loop-traces/issue-7.md" in body
     assert "- Validation status: passed" in body
     assert "- Automation will not merge." in body
 

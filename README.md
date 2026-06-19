@@ -115,6 +115,10 @@ policy:
 validation:
   commands:
     - python -m pytest
+
+trace:
+  mode: committed
+  artifact_dir: agentic-loop-traces
 ```
 
 If the config file lives outside the target repository, point `repository.root`
@@ -239,6 +243,10 @@ Fields:
   disable.
 - `validation.commands`: project checks run after implementation and after
   remediation. Commands are parsed into argv and run without a shell.
+- `trace.mode`: set to `committed` to add a Markdown audit artifact to the PR
+  branch, or `off` to skip trace artifacts.
+- `trace.artifact_dir`: directory for committed trace artifacts; defaults to
+  `agentic-loop-traces`.
 - `synthetic_review`: demo/test mode that returns configured findings instead of
   asking Codex to review.
 - `assets_dir`: optional top-level path for custom prompts and schemas. Omit it
@@ -317,6 +325,12 @@ manual action and continues.
 The PR body includes an agentic status section with the issue, phase, branch,
 plan summary, validation result, latest review summary, remediation count, and
 handoff status.
+
+When committed tracing is enabled, the controller also adds a compact Markdown
+artifact such as `agentic-loop-traces/issue-123.md` to the PR branch. This file
+records planner steps and risks, implementation/remediation summaries, validation
+results, reviewer findings, and final policy or handoff decisions so reviewers
+can audit what each agent decided.
 
 ## Handoff And Safety
 

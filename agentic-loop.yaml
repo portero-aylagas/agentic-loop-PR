@@ -27,6 +27,10 @@ validation:
     - python -m pytest
     - python -m agentic_loop validate
 
+trace:
+  mode: committed
+  artifact_dir: agentic-loop-traces
+
 synthetic_review:
   enabled: false
   findings: []

@@ -165,10 +165,12 @@ class FakeGit:
     def stage_paths(self, paths):
         self.staged_paths.append((self.cwd, list(paths)))
         reported = set(paths)
+        existing = {item.path for item in self.status}
         self.status = [
             StatusFile(item.path, item.index_status if item.path not in reported else _staged_status(item), " ")
             for item in self.status
         ]
+        self.status.extend(StatusFile(path, "A", " ") for path in paths if path not in existing)
 
     def checkout_or_create_branch(self, branch, base):
         self.branches.append((branch, base))
@@ -294,6 +296,14 @@ def config_without_validation():
     config = validate_all(ROOT / "agentic-loop.yaml")
     data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
     data.pop("validation", None)
+    data.pop("trace", None)
+    return LoopConfig(config.path, data)
+
+
+def config_with_trace():
+    config = config_without_validation()
+    data = {key: dict(value) if isinstance(value, dict) else value for key, value in config.data.items()}
+    data["trace"] = {"mode": "committed", "artifact_dir": "agentic-loop-traces"}
     return LoopConfig(config.path, data)
 
 
@@ -477,6 +487,27 @@ def test_created_pr_body_includes_managed_status_section():
     assert "- Source issue: #7" in body
     assert "- Plan summary: create fixture" in body
     assert "- Automation will not merge." in body
+
+
+def test_committed_trace_artifact_is_linked_and_committed():
+    config = config_with_trace()
+    github = FakeGitHub()
+    git = FakeGit()
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=git, provider=codex).run(7)
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    artifact = worktree / "agentic-loop-traces" / "issue-7.md"
+    body = github.pr_bodies[11]
+    assert "- Trace artifact: agentic-loop-traces/issue-7.md" in body
+    assert (worktree, ["agentic-loop-traces/issue-7.md"]) in git.staged_paths
+    assert any(message == "Record agentic trace for issue 7" for _, message in git.commits)
+    trace = artifact.read_text(encoding="utf-8")
+    assert "## Planner -" in trace
+    assert "1. write file" in trace
+    assert "## Implementer -" in trace
+    assert "## Reviewer -" in trace
+    assert "- Policy decision: approved" in trace
+    assert "## Orchestrator -" in trace
 
 
 def test_pr_body_refresh_preserves_unmanaged_text():
@@ -693,6 +724,24 @@ def test_unexpected_dirty_files_hand_off_without_commit():
     assert git.staged_paths == []
     assert git.commits == []
     assert any("unexpected dirty files: README.md" in body for _, body in github.issue_comments_log)
+
+
+def test_pre_pr_handoff_posts_trace_summary_on_issue():
+    config = config_with_trace()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[
+        StatusFile("tests/agentic_demo/sample.txt", " ", "M"),
+        StatusFile("README.md", " ", "M"),
+    ])
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert github.created_prs == []
+    trace_comments = [body for _, body in github.issue_comments_log if "Agentic trace before handoff" in body]
+    assert trace_comments
+    assert "## Planner -" in trace_comments[-1]
+    assert "## Implementer -" in trace_comments[-1]
+    assert "## Orchestrator -" in trace_comments[-1]
 
 
 def test_deleted_reported_file_is_staged_and_committed():

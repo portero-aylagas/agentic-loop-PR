@@ -31,6 +31,7 @@ def render_status_section(status: dict[str, Any]) -> str:
         f"- Current phase: {status.get('phase', 'unknown')}",
         f"- Branch: `{status.get('branch', '')}`",
         f"- Plan summary: {status.get('plan_summary') or 'not available'}",
+        f"- Trace artifact: {status.get('trace_artifact') or 'not enabled'}",
         f"- Validation status: {validation}",
         f"- Latest review summary: {status.get('review_summary') or 'not reviewed yet'}",
         f"- Remediation count/cycle: {status.get('remediation_count', 0)}/{status.get('cycle', 0)}",

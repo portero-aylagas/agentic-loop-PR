@@ -13,6 +13,7 @@ from .provider import RoleProvider
 from .pr_status import extract_status_value, upsert_status_section
 from .roles import automated_comment
 from .state import WorkflowState, decode_states, encode_state, newest_state
+from .trace import TraceRecorder, trace_artifact_path, trace_issue_summary
 from .validation import run_validation_commands, validation_comment, validation_failed
 
 
@@ -107,6 +108,7 @@ class Controller:
         self.provider = provider
         self.validation_runner = validation_runner
         self._plan_summary = ""
+        self._trace_events: list[dict[str, Any]] = []
 
     def run(self, issue_number: int, *, force: bool = False) -> RunResult:
         resume = self._resume_context(issue_number)
@@ -166,6 +168,7 @@ class Controller:
             payload={"issue": _issue_payload(issue), "branch": branch, **base_context},
         ).data
         self._plan_summary = str(plan.get("summary", ""))
+        self._trace_events.append({"role": "planner", "plan": plan})
         self._post_issue_state(issue.number, "implementing", 0, branch, None)
 
         implementation = self.provider.run_role(
@@ -174,6 +177,7 @@ class Controller:
             schema_path=schema_path(self.config, "implementation"),
             payload={"issue": _issue_payload(issue), "plan": plan, "branch": branch, **base_context},
         ).data
+        self._trace_events.append({"role": "implementer", "output": implementation})
         decision = self._stage_commit_and_push(
             issue=issue.number,
             branch=branch,
@@ -182,7 +186,10 @@ class Controller:
             default_message=f"Implement issue {issue.number}",
         )
         if decision is not None:
+            self._trace_events.append({"role": "orchestrator", "phase": "human-review", "reason": decision.reason})
+            self._comment_issue_trace_summary(issue.number)
             return None, decision
+        self._flush_trace_events(issue.number, branch)
         pr = self._ensure_pr(issue, branch, plan)
         return pr, decision
 
@@ -202,10 +209,13 @@ class Controller:
                 if validation_cycle != cycle:
                     validation_results = self._run_validation(pr.number)
                     validation_cycle = cycle
+                    self._record_trace_event(issue.number, branch, {"role": "validation", "results": validation_results})
                     self._refresh_pr_status(pr.number, issue.number, "reviewing", cycle, branch, validation_results=validation_results)
                 if validation_failed(validation_results) and cycle >= int(self.config.policy["max_review_cycles"]):
                     findings = [_validation_finding(validation_results)]
                     decision = PolicyDecision("handoff", "validation failed after policy limits")
+                    self._record_trace_event(issue.number, branch, {"role": "reviewer", "cycle": cycle, "review": {"status": "blocking", "summary": "validation failed", "findings": findings}, "decision": _decision_payload(decision)})
+                    self._record_trace_event(issue.number, branch, {"role": "orchestrator", "phase": "human-review", "reason": decision.reason})
                     self._post_pr_state(
                         pr.number,
                         issue.number,
@@ -226,6 +236,8 @@ class Controller:
                 protected_findings = self._protected_path_findings()
                 if protected_findings:
                     decision = PolicyDecision("handoff", "protected path changed before review")
+                    self._record_trace_event(issue.number, branch, {"role": "reviewer", "cycle": cycle, "review": {"status": "blocking", "summary": "protected path changed before review", "findings": protected_findings}, "decision": _decision_payload(decision)})
+                    self._record_trace_event(issue.number, branch, {"role": "orchestrator", "phase": "human-review", "reason": decision.reason})
                     self._post_pr_state(
                         pr.number,
                         issue.number,
@@ -246,6 +258,8 @@ class Controller:
                 size_findings = self._diff_size_findings()
                 if size_findings:
                     decision = PolicyDecision("handoff", "worktree diff exceeds policy limits")
+                    self._record_trace_event(issue.number, branch, {"role": "reviewer", "cycle": cycle, "review": {"status": "blocking", "summary": "worktree diff exceeds policy limits", "findings": size_findings}, "decision": _decision_payload(decision)})
+                    self._record_trace_event(issue.number, branch, {"role": "orchestrator", "phase": "human-review", "reason": decision.reason})
                     self._post_pr_state(
                         pr.number,
                         issue.number,
@@ -276,6 +290,7 @@ class Controller:
                 stagnant_cycles=int(self.config.policy["stagnant_cycles"]),
                 protected_paths=self.config.protected_paths,
             )
+            self._record_trace_event(issue.number, branch, {"role": "reviewer", "cycle": cycle, "review": review, "decision": _decision_payload(decision)})
             self._post_pr_state(
                 pr.number,
                 issue.number,
@@ -292,11 +307,13 @@ class Controller:
             )
             if decision.kind == "approved":
                 self._enter_phase(issue.number, "human-review", pr.number)
+                self._record_trace_event(issue.number, branch, {"role": "orchestrator", "phase": "human-review", "reason": decision.reason})
                 self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, review_summary=str(review.get("summary", "")), handoff_status=decision.reason)
                 self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff: review approved. Automation will not merge. Reason: {decision.reason}"))
                 return RunResult(issue.number, branch, pr.number, decision)
             if decision.kind == "handoff":
                 self._enter_phase(issue.number, "human-review", pr.number)
+                self._record_trace_event(issue.number, branch, {"role": "orchestrator", "phase": "human-review", "reason": decision.reason})
                 self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, review_summary=str(review.get("summary", "")), handoff_status=decision.reason)
                 self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {decision.reason}"))
                 return RunResult(issue.number, branch, pr.number, decision)
@@ -316,6 +333,7 @@ class Controller:
                 },
             ).data
             remediation_attempt_count += 1
+            self._trace_events.append({"role": "remediator", "cycle": cycle, "output": remediation})
             staging_decision = self._stage_commit_and_push(
                 issue=issue.number,
                 branch=branch,
@@ -324,6 +342,7 @@ class Controller:
                 default_message=f"Remediate issue {issue.number}",
             )
             if staging_decision is not None:
+                self._trace_events.append({"role": "orchestrator", "phase": "human-review", "reason": staging_decision.reason})
                 self._post_pr_state(
                     pr.number,
                     issue.number,
@@ -341,10 +360,12 @@ class Controller:
                 self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=staging_decision.reason)
                 self.github.comment_pr(pr.number, _orchestrator_comment(f"Human handoff required. Reason: {staging_decision.reason}"))
                 return RunResult(issue.number, branch, pr.number, staging_decision)
+            self._flush_trace_events(issue.number, branch)
             history.append(findings)
             cycle += 1
             validation_results = self._run_validation(pr.number)
             validation_cycle = cycle
+            self._record_trace_event(issue.number, branch, {"role": "validation", "results": validation_results})
             self._post_pr_state(
                 pr.number,
                 issue.number,
@@ -528,6 +549,7 @@ class Controller:
             branch=branch,
             pr=pr,
             model_provider=self._model_provider_identity(),
+            trace_artifact=self._trace_artifact(issue) if self._trace_enabled() else "",
         )
         self.github.comment_issue(issue, automated_comment(_role_for_phase(phase), _state_comment(f"Agentic workflow: {phase} on `{branch}`.", state)))
 
@@ -568,6 +590,7 @@ class Controller:
                 else _default_remediation_attempt_count(phase, cycle)
             ),
             model_provider=self._model_provider_identity(),
+            trace_artifact=self._trace_artifact(issue) if self._trace_enabled() else "",
         )
         self.github.comment_pr(pr, automated_comment(_role_for_phase(phase), _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state)))
         self._refresh_pr_status(
@@ -580,6 +603,34 @@ class Controller:
             review_summary=review_summary,
             handoff_status=handoff_reason if status == "handoff" else "",
         )
+
+    def _record_trace_event(self, issue: int, branch: str, event: dict[str, Any]) -> None:
+        self._trace_events.append(event)
+        self._flush_trace_events(issue, branch)
+
+    def _flush_trace_events(self, issue: int, branch: str) -> None:
+        if not self._trace_events:
+            return
+        if not self._trace_enabled():
+            self._trace_events = []
+            return
+        trace = TraceRecorder(issue=issue, branch=branch, artifact_path=self._trace_artifact(issue))
+        for event in self._trace_events:
+            trace.append(self._validation_cwd(), event)
+        self._commit_trace_artifact(issue, branch)
+        self._trace_events = []
+
+    def _commit_trace_artifact(self, issue: int, branch: str) -> None:
+        artifact = self._trace_artifact(issue)
+        self.git.stage_paths([artifact])
+        if self.git.commit_staged(f"Record agentic trace for issue {issue}"):
+            self.git.push_branch(branch)
+
+    def _comment_issue_trace_summary(self, issue: int) -> None:
+        if not self._trace_enabled() or not self._trace_events:
+            return
+        body = "Agentic trace before handoff:\n\n" + trace_issue_summary(self._trace_events)
+        self.github.comment_issue(issue, _orchestrator_comment(body))
 
     def _refresh_pr_status(
         self,
@@ -627,7 +678,14 @@ class Controller:
             "remediation_count": cycle,
             "cycle": cycle,
             "handoff_status": handoff_status,
+            "trace_artifact": self._trace_artifact(issue) if self._trace_enabled() else "",
         }
+
+    def _trace_enabled(self) -> bool:
+        return str(self.config.trace.get("mode", "off")) == "committed"
+
+    def _trace_artifact(self, issue: int) -> str:
+        return trace_artifact_path(issue, str(self.config.trace.get("artifact_dir", "agentic-loop-traces")))
 
     def _model_provider_identity(self) -> dict[str, Any]:
         identity: dict[str, Any] = {"provider": type(self.provider).__name__}
@@ -701,6 +759,10 @@ def _pr_payload(pr: PullRequest) -> dict[str, Any]:
 
 def _base_context(config: LoopConfig) -> dict[str, str]:
     return {"base_ref": config.base_branch, "remote_base_ref": f"{config.remote}/{config.base_branch}"}
+
+
+def _decision_payload(decision: PolicyDecision) -> dict[str, str]:
+    return {"kind": decision.kind, "reason": decision.reason}
 
 
 def _reported_files(output: dict[str, Any]) -> tuple[list[str], str | None]:
