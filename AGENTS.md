@@ -7,6 +7,11 @@ This repository is a standalone demo for a Python agentic issue-to-PR loop.
 - Do not commit directly to `main`.
 - Keep changes small and demo-focused.
 - Validate with `python -m pytest` and `python -m agentic_loop validate` before handoff.
+- Treat `.worktrees/agentic-issue-*` as controller-created run worktrees, often
+  from seeded demo issues. Identify seeded demo runs by the `agentic-demo`
+  GitHub issue label, the `agentic/issue-<number>` branch, and the
+  `.worktrees/agentic-issue-<number>` path. Do not delete or stage those
+  worktrees unless explicitly asked.
 
 ## Scope
 

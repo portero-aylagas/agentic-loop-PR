@@ -291,6 +291,13 @@ worktree, refuses to continue if that worktree has uncommitted changes, and uses
 Codex inside the worktree. It stages only files reported by Codex role output.
 Unexpected dirty files force human handoff.
 
+For seeded demo runs, these worktrees use the same naming pattern. For example,
+issue `15` uses branch `agentic/issue-15` and worktree
+`.worktrees/agentic-issue-15`. Seeded demo issues carry the `agentic-demo`
+label, so agents and maintainers can distinguish demo-test worktrees from
+unrelated untracked directories. Do not delete or stage `.worktrees/` contents
+unless you are intentionally cleaning up demo run state.
+
 The helper stores resumable workflow state in hidden GitHub comments using the
 marker `agentic-workflow-state:v1`. It reads state from issue and PR comments to
 resume review/remediation work or detect terminal runs.
