@@ -35,6 +35,7 @@ class CommandRunner:
             input=input_text,
             cwd=cwd,
             text=True,
+            encoding="utf-8",
             shell=False,
             capture_output=True,
             check=False,

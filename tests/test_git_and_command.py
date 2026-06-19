@@ -38,7 +38,21 @@ def test_command_runner_uses_list_args_and_stdin_for_untrusted_text(monkeypatch)
     CommandRunner().run(["codex", "exec", "-"], input_text=untrusted)
     assert calls["args"] == ["codex", "exec", "-"]
     assert calls["kwargs"]["input"] == untrusted
+    assert calls["kwargs"]["encoding"] == "utf-8"
     assert calls["kwargs"]["shell"] is False
+
+
+def test_command_runner_accepts_unicode_stdin(monkeypatch):
+    calls = {}
+
+    def fake_run(args, **kwargs):
+        calls["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    CommandRunner().run(["codex", "exec", "-"], input_text="🧑‍💼📝 planner")
+    assert calls["kwargs"]["input"] == "🧑‍💼📝 planner"
+    assert calls["kwargs"]["encoding"] == "utf-8"
 
 
 def test_validation_command_parser_returns_argv():
