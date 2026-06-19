@@ -5,7 +5,7 @@ from agentic_loop.cli import _resolve_issue_file, seed_demo
 from agentic_loop.command import CommandResult
 from agentic_loop.config import LoopConfig, validate_all
 from agentic_loop.controller import Controller
-from agentic_loop.git_client import DiffFile, DiffStats
+from agentic_loop.git_client import DiffFile, DiffStats, StatusFile
 from agentic_loop.github_cli import Issue, PullRequest
 from agentic_loop.state import WorkflowState, decode_states, encode_state
 
@@ -80,10 +80,13 @@ class FakeGitHub:
 
 
 class FakeGit:
-    def __init__(self, dirty=False, changed_files=None, diff_lines=0, cwd=ROOT):
+    def __init__(self, dirty=False, changed_files=None, diff_lines=0, status_files=None, cwd=ROOT):
         self.dirty = dirty
         self.changed = list(changed_files or [])
         self.diff_lines = diff_lines
+        if status_files is None:
+            status_files = [StatusFile("tests/agentic_demo/sample.txt", " ", "M")]
+        self.status = list(status_files)
         self.changed_calls = 0
         self.cwd = Path(cwd)
         self.prepared_worktrees = []
@@ -91,15 +94,17 @@ class FakeGit:
         self.commits = []
         self.pushes = []
         self.synced_bases = []
+        self.staged_paths = []
 
     def with_cwd(self, cwd):
-        clone = FakeGit(dirty=self.dirty, changed_files=self.changed, diff_lines=self.diff_lines, cwd=cwd)
+        clone = FakeGit(dirty=self.dirty, changed_files=self.changed, diff_lines=self.diff_lines, status_files=self.status, cwd=cwd)
         clone.changed_calls = self.changed_calls
         clone.prepared_worktrees = self.prepared_worktrees
         clone.branches = self.branches
         clone.commits = self.commits
         clone.pushes = self.pushes
         clone.synced_bases = self.synced_bases
+        clone.staged_paths = self.staged_paths
         return clone
 
     def prepare_issue_worktree(self, *, issue, branch, base, repo_root):
@@ -111,6 +116,17 @@ class FakeGit:
 
     def has_changes(self):
         return self.dirty
+
+    def status_files(self):
+        return list(self.status)
+
+    def stage_paths(self, paths):
+        self.staged_paths.append((self.cwd, list(paths)))
+        reported = set(paths)
+        self.status = [
+            StatusFile(item.path, item.index_status if item.path not in reported else _staged_status(item), " ")
+            for item in self.status
+        ]
 
     def checkout_or_create_branch(self, branch, base):
         self.branches.append((branch, base))
@@ -141,6 +157,13 @@ class FakeGit:
 
     def commit(self, message):
         self.commits.append((self.cwd, message))
+        return True
+
+    def commit_staged(self, message):
+        if not any(item.index_status != " " for item in self.status):
+            return False
+        self.commits.append((self.cwd, message))
+        self.status = [StatusFile("tests/agentic_demo/sample.txt", " ", "M")]
         return True
 
     def push_branch(self, branch):
@@ -177,6 +200,41 @@ class FakeCodex:
         else:
             raise AssertionError(role)
         return SimpleNamespace(data=data)
+
+
+class CustomFileCodex(FakeCodex):
+    def __init__(self, reviews, *, implementation_files, remediation_files=None, cwd=ROOT):
+        super().__init__(reviews, cwd=cwd)
+        self.implementation_files = implementation_files
+        self.remediation_files = remediation_files if remediation_files is not None else implementation_files
+
+    def with_cwd(self, cwd):
+        clone = type(self)(
+            self.reviews,
+            implementation_files=self.implementation_files,
+            remediation_files=self.remediation_files,
+            cwd=cwd,
+        )
+        clone.roles = self.roles
+        clone.payloads = self.payloads
+        clone.cwd_log = self.cwd_log
+        return clone
+
+    def run_role(self, *, role, prompt_path, schema_path, payload):
+        result = super().run_role(role=role, prompt_path=prompt_path, schema_path=schema_path, payload=payload)
+        if role == "implementer":
+            result.data["files_changed"] = list(self.implementation_files)
+        elif role == "remediator":
+            result.data["files_changed"] = list(self.remediation_files)
+        return result
+
+
+def _staged_status(item):
+    if item.worktree_status == "?":
+        return "A"
+    if item.worktree_status != " ":
+        return item.worktree_status
+    return item.index_status
 
 
 class FakeValidationRunner:
@@ -231,6 +289,10 @@ def test_blocking_finding_remediation_rereview_handoff():
     assert codex.cwd_log == [worktree, worktree, worktree, worktree, worktree]
     assert git.commits == [(worktree, "Implement demo fixture"), (worktree, "Remediate demo fixture")]
     assert git.pushes == [(worktree, "agentic/issue-7"), (worktree, "agentic/issue-7")]
+    assert git.staged_paths == [
+        (worktree, ["tests/agentic_demo/sample.txt"]),
+        (worktree, ["tests/agentic_demo/sample.txt"]),
+    ]
     assert any("Human handoff" in body for _, body in github.pr_comments_log)
     assert any("Agentic workflow:" in body for _, body in github.issue_comments_log)
     assert ("add_issue", 7, "agentic:planning") in github.label_ops
@@ -428,6 +490,70 @@ def test_absent_diff_size_policy_defaults_do_not_limit():
     result = Controller(config=config, github=github, git=git, codex=codex).run(7)
     assert result.decision.kind == "approved"
     assert codex.roles == ["planner", "implementer", "reviewer"]
+
+
+def test_reported_only_files_are_staged_and_committed():
+    config = config_without_validation()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[StatusFile("tests/agentic_demo/sample.txt", " ", "M")])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    assert result.decision.kind == "approved"
+    assert git.staged_paths == [(worktree, ["tests/agentic_demo/sample.txt"])]
+    assert git.commits == [(worktree, "Implement demo fixture")]
+
+
+def test_unexpected_dirty_files_hand_off_without_commit():
+    config = config_without_validation()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[
+        StatusFile("tests/agentic_demo/sample.txt", " ", "M"),
+        StatusFile("README.md", " ", "M"),
+    ])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "unexpected dirty files"
+    assert git.staged_paths == []
+    assert git.commits == []
+    assert any("unexpected dirty files: README.md" in body for _, body in github.issue_comments_log)
+
+
+def test_deleted_reported_file_is_staged_and_committed():
+    config = config_without_validation()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[StatusFile("tests/agentic_demo/sample.txt", " ", "D")])
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    assert result.decision.kind == "approved"
+    assert git.staged_paths == [(worktree, ["tests/agentic_demo/sample.txt"])]
+    assert git.commits == [(worktree, "Implement demo fixture")]
+
+
+def test_no_change_output_skips_commit_but_pushes_branch():
+    config = config_without_validation()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[])
+    codex = CustomFileCodex([{ "status": "approved", "summary": "ok", "findings": [] }], implementation_files=[])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    assert result.decision.kind == "approved"
+    assert git.staged_paths == []
+    assert git.commits == []
+    assert git.pushes == [(worktree, "agentic/issue-7")]
+
+
+def test_reported_file_not_in_git_status_hands_off():
+    config = config_without_validation()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[])
+    codex = CustomFileCodex([{ "status": "approved", "summary": "ok", "findings": [] }], implementation_files=["tests/agentic_demo/sample.txt"])
+    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "reported files are not dirty: tests/agentic_demo/sample.txt"
+    assert git.commits == []
 
 
 def test_validation_success_posts_comment_and_reaches_reviewer():

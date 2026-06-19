@@ -129,7 +129,12 @@ class Controller:
         try:
             base_context = _base_context(self.config)
             if force or not resume.can_resume_review:
-                pr = self._plan_implement_and_open_pr(issue, branch, base_context)
+                pr, handoff = self._plan_implement_and_open_pr(issue, branch, base_context)
+                if handoff is not None:
+                    self._enter_phase(issue.number, "human-review", pr.number if pr is not None else None)
+                    if pr is not None:
+                        self.github.comment_pr(pr.number, f"Human handoff required. Reason: {handoff.reason}")
+                    return RunResult(issue.number, branch, pr.number if pr is not None else None, handoff)
                 resume = ResumeContext(branch=branch, pr=pr, state=None, states=[])
                 self._post_pr_state(pr.number, issue.number, "reviewing", 0, branch, [])
             elif pr is None:
@@ -146,7 +151,7 @@ class Controller:
             self._enter_phase(issue.number, "failed", pr.number if pr is not None else None)
             raise
 
-    def _plan_implement_and_open_pr(self, issue: Issue, branch: str, base_context: dict[str, str]) -> PullRequest:
+    def _plan_implement_and_open_pr(self, issue: Issue, branch: str, base_context: dict[str, str]) -> tuple[PullRequest | None, PolicyDecision | None]:
         self._post_issue_state(issue.number, "planning", 0, branch, None)
         plan = self.codex.run_role(
             role="planner",
@@ -162,9 +167,17 @@ class Controller:
             schema_path=schema_path(self.config, "implementation"),
             payload={"issue": _issue_payload(issue), "plan": plan, "branch": branch, **base_context},
         ).data
-        self.git.commit(str(implementation.get("commit_message", f"Implement issue {issue.number}")))
-        self.git.push_branch(branch)
-        return self._ensure_pr(issue, branch, plan)
+        decision = self._stage_commit_and_push(
+            issue=issue.number,
+            branch=branch,
+            role="implementer",
+            output=implementation,
+            default_message=f"Implement issue {issue.number}",
+        )
+        if decision is not None:
+            return None, decision
+        pr = self._ensure_pr(issue, branch, plan)
+        return pr, decision
 
     def _review_loop(self, issue: Issue, pr: PullRequest, branch: str, resume: ResumeContext) -> RunResult:
         history = _review_history(resume.states)
@@ -237,8 +250,18 @@ class Controller:
                     **_base_context(self.config),
                 },
             ).data
-            self.git.commit(str(remediation.get("commit_message", f"Remediate issue {issue.number}")))
-            self.git.push_branch(branch)
+            staging_decision = self._stage_commit_and_push(
+                issue=issue.number,
+                branch=branch,
+                role="remediator",
+                output=remediation,
+                default_message=f"Remediate issue {issue.number}",
+            )
+            if staging_decision is not None:
+                self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, staging_decision.kind, staging_decision.reason, validation_results)
+                self._enter_phase(issue.number, "human-review", pr.number)
+                self.github.comment_pr(pr.number, f"Human handoff required. Reason: {staging_decision.reason}")
+                return RunResult(issue.number, branch, pr.number, staging_decision)
             history.append(findings)
             cycle += 1
             validation_results = self._run_validation(pr.number)
@@ -339,6 +362,55 @@ class Controller:
             "conflicting": True,
         }]
 
+    def _stage_commit_and_push(
+        self,
+        *,
+        issue: int,
+        branch: str,
+        role: str,
+        output: dict[str, Any],
+        default_message: str,
+    ) -> PolicyDecision | None:
+        files, error = _reported_files(output)
+        if error:
+            return self._staging_handoff(issue, role, error)
+
+        before = self.git.status_files()
+        if not before:
+            if files:
+                return self._staging_handoff(issue, role, f"reported files are not dirty: {', '.join(files)}")
+            self.git.push_branch(branch)
+            return None
+
+        status_by_path = {item.path: item for item in before}
+        unexpected = sorted(item.path for item in before if item.path not in files)
+        if unexpected:
+            return self._staging_handoff(issue, role, f"unexpected dirty files: {', '.join(unexpected)}", "unexpected dirty files")
+
+        unreconciled = sorted(path for path in files if path not in status_by_path)
+        if unreconciled:
+            return self._staging_handoff(issue, role, f"reported files are not dirty: {', '.join(unreconciled)}")
+
+        self.git.stage_paths(files)
+        after = self.git.status_files()
+        unstaged_reported = sorted(item.path for item in after if item.path in files and item.worktree_status != " ")
+        if unstaged_reported:
+            return self._staging_handoff(issue, role, f"reported files could not be fully staged: {', '.join(unstaged_reported)}")
+        unexpected_after = sorted(item.path for item in after if item.path not in files)
+        if unexpected_after:
+            return self._staging_handoff(issue, role, f"unexpected dirty files: {', '.join(unexpected_after)}", "unexpected dirty files")
+
+        if not any(item.path in files and item.index_status != " " for item in after):
+            return None
+
+        self.git.commit_staged(str(output.get("commit_message", default_message)))
+        self.git.push_branch(branch)
+        return None
+
+    def _staging_handoff(self, issue: int, role: str, message: str, reason: str | None = None) -> PolicyDecision:
+        self.github.comment_issue(issue, f"Human handoff required after {role}: {message}")
+        return PolicyDecision("handoff", reason or message)
+
     def _run_validation(self, pr: int) -> dict[str, Any]:
         results = run_validation_commands(
             self.config.validation_commands,
@@ -434,6 +506,23 @@ def _pr_payload(pr: PullRequest) -> dict[str, Any]:
 
 def _base_context(config: LoopConfig) -> dict[str, str]:
     return {"base_ref": config.base_branch, "remote_base_ref": f"{config.remote}/{config.base_branch}"}
+
+
+def _reported_files(output: dict[str, Any]) -> tuple[list[str], str | None]:
+    raw = output.get("files_changed")
+    if raw is None:
+        raw = output.get("changed_files")
+    if not isinstance(raw, list):
+        return [], "Codex output did not report changed file paths"
+    files = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            return [], "Codex output reported an invalid changed file path"
+        path = item.strip().replace("\\", "/")
+        if path.startswith("/") or path.startswith("../") or "/../" in path:
+            return [], f"Codex output reported an unsafe changed file path: {item}"
+        files.append(path)
+    return sorted(set(files)), None
 
 
 def _state_comment(message: str, state: WorkflowState) -> str:

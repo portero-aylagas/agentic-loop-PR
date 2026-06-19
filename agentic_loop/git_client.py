@@ -18,6 +18,17 @@ class DiffStats:
     diff_lines: int
 
 
+@dataclass(frozen=True)
+class StatusFile:
+    path: str
+    index_status: str
+    worktree_status: str
+
+    @property
+    def is_dirty(self) -> bool:
+        return self.index_status != " " or self.worktree_status != " "
+
+
 class GitClient:
     def __init__(self, runner: CommandRunner | None = None, cwd: str | None = None, remote: str = "origin"):
         self.runner = runner or CommandRunner()
@@ -96,6 +107,15 @@ class GitClient:
     def has_changes(self) -> bool:
         return bool(self.runner.run(["git", "status", "--porcelain"], cwd=self.cwd).stdout.strip())
 
+    def status_files(self) -> list[StatusFile]:
+        result = self.runner.run(["git", "status", "--porcelain"], cwd=self.cwd)
+        return parse_status(result.stdout)
+
+    def stage_paths(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        self.runner.run(["git", "add", "--", *paths], cwd=self.cwd)
+
     def add_all(self) -> None:
         self.runner.run(["git", "add", "--all"], cwd=self.cwd)
 
@@ -103,6 +123,13 @@ class GitClient:
         if not self.has_changes():
             return False
         self.add_all()
+        self.runner.run(["git", "commit", "-m", message], cwd=self.cwd)
+        return True
+
+    def commit_staged(self, message: str) -> bool:
+        staged = [item for item in self.status_files() if item.index_status != " "]
+        if not staged:
+            return False
         self.runner.run(["git", "commit", "-m", message], cwd=self.cwd)
         return True
 
@@ -128,6 +155,21 @@ def parse_name_status(output: str) -> list[DiffFile]:
         status = parts[0]
         path = parts[-1]
         files.append(DiffFile(path=path, status=status))
+    return files
+
+
+def parse_status(output: str) -> list[StatusFile]:
+    files: list[StatusFile] = []
+    for line in output.splitlines():
+        if not line:
+            continue
+        if len(line) < 4:
+            continue
+        index_status = line[0]
+        worktree_status = line[1]
+        raw_path = line[3:]
+        path = raw_path.split(" -> ")[-1] if " -> " in raw_path else raw_path
+        files.append(StatusFile(path=path, index_status=index_status, worktree_status=worktree_status))
     return files
 
 

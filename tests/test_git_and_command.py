@@ -1,7 +1,7 @@
 import subprocess
 
 from agentic_loop.command import CommandRunner
-from agentic_loop.git_client import GitClient, parse_name_status, parse_numstat_lines
+from agentic_loop.git_client import GitClient, parse_name_status, parse_numstat_lines, parse_status
 from agentic_loop.github_cli import GitHubCli
 from agentic_loop.validation import parse_command
 
@@ -13,6 +13,16 @@ def test_parse_name_status():
 
 def test_parse_numstat_lines():
     assert parse_numstat_lines("2\t3\tREADME.md\n-\t-\timage.png\n0\t4\ttests/demo.py\n") == 9
+
+
+def test_parse_status_supports_modified_added_deleted_and_renamed():
+    parsed = parse_status(" M README.md\n?? tests/demo.py\n D old.txt\nR  before.py -> after.py\n")
+    assert [(item.index_status, item.worktree_status, item.path) for item in parsed] == [
+        (" ", "M", "README.md"),
+        ("?", "?", "tests/demo.py"),
+        (" ", "D", "old.txt"),
+        ("R", " ", "after.py"),
+    ]
 
 
 def test_command_runner_uses_list_args_and_stdin_for_untrusted_text(monkeypatch):
@@ -96,6 +106,18 @@ def test_git_client_sync_base_aborts_when_local_base_diverged():
         assert "diverged" in str(exc)
     else:
         raise AssertionError("diverged base should abort")
+
+
+def test_git_client_stages_specific_paths():
+    calls = []
+
+    class FakeRunner:
+        def run(self, args, *, cwd=None, check=True):
+            calls.append((list(args), cwd, check))
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    GitClient(runner=FakeRunner(), cwd="repo").stage_paths(["README.md", "tests/demo.py"])
+    assert calls == [(["git", "add", "--", "README.md", "tests/demo.py"], "repo", True)]
 
 
 def test_git_client_prepares_new_issue_worktree_from_remote_base(tmp_path):
