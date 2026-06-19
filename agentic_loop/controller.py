@@ -650,14 +650,14 @@ class Controller:
 
     def _apply_phase_label(self, target: str, number: int, current_label: str) -> None:
         if not self.github.ensure_label(current_label, description="Agentic workflow phase"):
-            self._comment_label_failure(target, number, f"create label `{current_label}`")
+            self._comment_label_failure(target, number, "create", current_label)
         for label in PHASE_LABELS:
             if label == current_label:
                 continue
             if not self._remove_label(target, number, label):
-                self._comment_label_failure(target, number, f"remove label `{label}`")
+                self._comment_label_failure(target, number, "remove", label)
         if not self._add_label(target, number, current_label):
-            self._comment_label_failure(target, number, f"add label `{current_label}`")
+            self._comment_label_failure(target, number, "add", current_label)
 
     def _add_label(self, target: str, number: int, label: str) -> bool:
         if target == "issue":
@@ -669,8 +669,12 @@ class Controller:
             return self.github.remove_issue_label(number, label)
         return self.github.remove_pr_label(number, label)
 
-    def _comment_label_failure(self, target: str, number: int, action: str) -> None:
-        body = f"Agentic workflow label update failed: could not {action}. Continuing without blocking automation."
+    def _comment_label_failure(self, target: str, number: int, action: str, label: str) -> None:
+        body = (
+            f"Agentic workflow label update failed: could not {action} label `{label}` on {target} #{number}. "
+            f"Manual action: {_label_manual_action(action, label, target, number)} "
+            "Continuing without blocking automation."
+        )
         if target == "issue":
             self.github.comment_issue(number, body)
         else:
@@ -830,3 +834,13 @@ def _phase_label(phase: str) -> str | None:
     if phase in {"human-review", "failed"}:
         return f"agentic:{phase}"
     return None
+
+
+def _label_manual_action(action: str, label: str, target: str, number: int) -> str:
+    if action == "create":
+        return f"create `{label}` in the repository, or grant label-management permission."
+    if action == "add":
+        return f"create `{label}` if it is missing, then add it to {target} #{number}."
+    if action == "remove":
+        return f"remove `{label}` from {target} #{number} if it is present, or grant label-edit permission."
+    return "check the repository label permissions."

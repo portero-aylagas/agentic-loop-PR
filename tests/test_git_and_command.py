@@ -194,6 +194,25 @@ def test_github_cli_label_helpers_use_non_throwing_edit_commands():
     ]
 
 
+def test_github_cli_label_helpers_return_false_on_failures():
+    class FakeRunner:
+        def run(self, args, *, check=True):
+            return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "permission denied"})()
+
+    github = GitHubCli(runner=FakeRunner())
+    assert not github.ensure_label("agentic:planning")
+    assert not github.add_issue_label(7, "agentic:planning")
+    assert not github.remove_issue_label(7, "agentic:implementing")
+
+
+def test_github_cli_label_create_already_exists_is_success():
+    class FakeRunner:
+        def run(self, args, *, check=True):
+            return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "already exists"})()
+
+    assert GitHubCli(runner=FakeRunner()).ensure_label("agentic:planning")
+
+
 def test_github_cli_reads_and_edits_pr_body():
     calls = []
 

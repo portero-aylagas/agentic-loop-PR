@@ -65,8 +65,14 @@ def seed_demo(config, issue_file: Path, github=None):
             failed_labels.append(label)
     body = issue_file.read_text(encoding="utf-8")
     issue = github.create_issue("Agentic loop demo: isolated text fixture", body, labels)
-    if failed_labels:
-        github.comment_issue(issue.number, f"Label creation failed; apply manually if needed: {', '.join(failed_labels)}")
+    for label in failed_labels:
+        github.comment_issue(
+            issue.number,
+            (
+                f"Label update failed: could not create label `{label}` for seeded demo issue #{issue.number}. "
+                "Manual action: create the label in GitHub and add it to this issue if needed."
+            ),
+        )
     return issue
 
 

@@ -331,8 +331,49 @@ def test_phase_label_permission_failure_posts_visible_comment():
     config = config_without_validation()
     github = FakeGitHub(failed_label_ops={("add_issue", 7, "agentic:planning")})
     codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
-    assert any("label update failed" in body and "add label `agentic:planning`" in body for _, body in github.issue_comments_log)
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert any(
+        "label update failed" in body
+        and "add label `agentic:planning` on issue #7" in body
+        and "Manual action: create `agentic:planning` if it is missing, then add it to issue #7." in body
+        for _, body in github.issue_comments_log
+    )
+
+
+def test_phase_label_creation_failure_posts_visible_comment_and_continues():
+    config = config_without_validation()
+    github = FakeGitHub(failed_label_ops={("ensure", "agentic:planning")})
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert any(
+        "could not create label `agentic:planning` on issue #7" in body
+        and "Manual action: create `agentic:planning` in the repository" in body
+        for _, body in github.issue_comments_log
+    )
+
+
+def test_phase_label_remove_failure_posts_visible_comment_and_continues():
+    config = config_without_validation()
+    github = FakeGitHub(failed_label_ops={("remove_issue", 7, "agentic:implementing")})
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert any(
+        "could not remove label `agentic:implementing` on issue #7" in body
+        and "Manual action: remove `agentic:implementing` from issue #7 if it is present" in body
+        for _, body in github.issue_comments_log
+    )
+
+
+def test_phase_label_success_path_does_not_post_label_failure_comment():
+    config = config_without_validation()
+    github = FakeGitHub()
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert not any("label update failed" in body.lower() for _, body in [*github.issue_comments_log, *github.pr_comments_log])
 
 
 def test_failed_phase_label_is_applied_when_controller_errors_before_pr():
@@ -685,7 +726,8 @@ def test_seed_demo_label_creation_fallback_comment(tmp_path):
     issue = seed_demo(config, issue_file, github=github)
     assert issue.number == 7
     assert github.created_issue_labels == [config.ready_label]
-    assert "Label creation failed" in github.issue_comments_log[0][1]
+    assert "could not create label" in github.issue_comments_log[0][1]
+    assert "Manual action: create the label in GitHub and add it to this issue if needed." in github.issue_comments_log[0][1]
 
 
 def test_issue_file_resolves_relative_to_repository_root():
