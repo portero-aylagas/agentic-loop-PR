@@ -10,6 +10,7 @@ from .config import LoopConfig, prompt_path, schema_path
 from .git_client import GitClient
 from .github_cli import GitHubCli, Issue, PullRequest
 from .policy import PolicyDecision, decide_review, protected_path_matches
+from .pr_status import extract_status_value, upsert_status_section
 from .state import WorkflowState, decode_states, encode_state, newest_state
 from .validation import run_validation_commands, validation_comment, validation_failed
 
@@ -104,6 +105,7 @@ class Controller:
         self.git = git
         self.codex = codex
         self.validation_runner = validation_runner
+        self._plan_summary = ""
 
     def run(self, issue_number: int, *, force: bool = False) -> RunResult:
         resume = self._resume_context(issue_number)
@@ -143,12 +145,15 @@ class Controller:
             completed = resume.completed_review_decision
             if completed is not None:
                 self._enter_phase(issue.number, "human-review", pr.number)
+                self._refresh_pr_status(pr.number, issue.number, "human-review", resume.next_cycle, branch, handoff_status=completed.reason)
                 self.github.comment_pr(pr.number, f"Human handoff required. Reason: {completed.reason}")
                 return RunResult(issue.number, branch, pr.number, completed)
 
             return self._review_loop(issue, pr, branch, resume)
         except Exception:
             self._enter_phase(issue.number, "failed", pr.number if pr is not None else None)
+            if pr is not None:
+                self._refresh_pr_status(pr.number, issue.number, "failed", 0, branch, handoff_status="failed")
             raise
 
     def _plan_implement_and_open_pr(self, issue: Issue, branch: str, base_context: dict[str, str]) -> tuple[PullRequest | None, PolicyDecision | None]:
@@ -159,6 +164,7 @@ class Controller:
             schema_path=schema_path(self.config, "plan"),
             payload={"issue": _issue_payload(issue), "branch": branch, **base_context},
         ).data
+        self._plan_summary = str(plan.get("summary", ""))
         self._post_issue_state(issue.number, "implementing", 0, branch, None)
 
         implementation = self.codex.run_role(
@@ -193,11 +199,13 @@ class Controller:
                 if validation_cycle != cycle:
                     validation_results = self._run_validation(pr.number)
                     validation_cycle = cycle
+                    self._refresh_pr_status(pr.number, issue.number, "reviewing", cycle, branch, validation_results=validation_results)
                 if validation_failed(validation_results) and cycle >= int(self.config.policy["max_review_cycles"]):
                     findings = [_validation_finding(validation_results)]
                     decision = PolicyDecision("handoff", "validation failed after policy limits")
                     self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind, decision.reason, validation_results)
                     self._enter_phase(issue.number, "human-review", pr.number)
+                    self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                     return RunResult(issue.number, branch, pr.number, decision)
                 protected_findings = self._protected_path_findings()
@@ -205,6 +213,7 @@ class Controller:
                     decision = PolicyDecision("handoff", "protected path changed before review")
                     self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, protected_findings, decision.kind, decision.reason, validation_results)
                     self._enter_phase(issue.number, "human-review", pr.number)
+                    self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                     return RunResult(issue.number, branch, pr.number, decision)
                 size_findings = self._diff_size_findings()
@@ -212,6 +221,7 @@ class Controller:
                     decision = PolicyDecision("handoff", "worktree diff exceeds policy limits")
                     self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, size_findings, decision.kind, decision.reason, validation_results)
                     self._enter_phase(issue.number, "human-review", pr.number)
+                    self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                     return RunResult(issue.number, branch, pr.number, decision)
                 review = self._review(issue, pr, branch, cycle, history, validation_results)
@@ -226,13 +236,26 @@ class Controller:
                 stagnant_cycles=int(self.config.policy["stagnant_cycles"]),
                 protected_paths=self.config.protected_paths,
             )
-            self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind, decision.reason, validation_results)
+            self._post_pr_state(
+                pr.number,
+                issue.number,
+                "reviewed",
+                cycle,
+                branch,
+                findings,
+                decision.kind,
+                decision.reason,
+                validation_results,
+                review_summary=str(review.get("summary", "")),
+            )
             if decision.kind == "approved":
                 self._enter_phase(issue.number, "human-review", pr.number)
+                self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, review_summary=str(review.get("summary", "")), handoff_status=decision.reason)
                 self.github.comment_pr(pr.number, f"Human handoff: review approved. Automation will not merge. Reason: {decision.reason}")
                 return RunResult(issue.number, branch, pr.number, decision)
             if decision.kind == "handoff":
                 self._enter_phase(issue.number, "human-review", pr.number)
+                self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, review_summary=str(review.get("summary", "")), handoff_status=decision.reason)
                 self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                 return RunResult(issue.number, branch, pr.number, decision)
 
@@ -260,6 +283,7 @@ class Controller:
             if staging_decision is not None:
                 self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, staging_decision.kind, staging_decision.reason, validation_results)
                 self._enter_phase(issue.number, "human-review", pr.number)
+                self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=staging_decision.reason)
                 self.github.comment_pr(pr.number, f"Human handoff required. Reason: {staging_decision.reason}")
                 return RunResult(issue.number, branch, pr.number, staging_decision)
             history.append(findings)
@@ -290,10 +314,14 @@ class Controller:
     def _ensure_pr(self, issue: Issue, branch: str, plan: dict[str, Any]) -> PullRequest:
         existing = self.github.find_open_pr_by_branch(branch)
         if existing is not None:
+            self._refresh_pr_status(existing.number, issue.number, "reviewing", 0, branch)
             return existing
         title = f"Agentic demo: issue #{issue.number}"
         summary = str(plan.get("summary", issue.title))
-        body = f"Closes #{issue.number}\n\n{summary}\n\nAutomation stops at human handoff and will not merge this PR."
+        body = upsert_status_section(
+            f"Closes #{issue.number}\n\n{summary}",
+            self._pr_status(issue.number, "reviewing", 0, branch, plan_summary=summary),
+        )
         return self.github.create_pr(title=title, body=body, head=branch, base=self.config.base_branch)
 
     def _review(
@@ -442,6 +470,7 @@ class Controller:
         status: str = "running",
         handoff_reason: str = "",
         validation_results: dict[str, Any] | None = None,
+        review_summary: str = "",
     ) -> None:
         self._enter_phase(issue, phase, pr)
         state = WorkflowState(
@@ -456,6 +485,64 @@ class Controller:
             handoff_reason=handoff_reason,
         )
         self.github.comment_pr(pr, _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state))
+        self._refresh_pr_status(
+            pr,
+            issue,
+            phase,
+            cycle,
+            branch,
+            validation_results=validation_results,
+            review_summary=review_summary,
+            handoff_status=handoff_reason if status == "handoff" else "",
+        )
+
+    def _refresh_pr_status(
+        self,
+        pr: int,
+        issue: int,
+        phase: str,
+        cycle: int,
+        branch: str,
+        *,
+        validation_results: dict[str, Any] | None = None,
+        review_summary: str = "",
+        handoff_status: str = "",
+    ) -> None:
+        body = self.github.pr_body(pr)
+        status = self._pr_status(
+            issue,
+            phase,
+            cycle,
+            branch,
+            validation_results=validation_results,
+            review_summary=review_summary or extract_status_value(body, "Latest review summary"),
+            handoff_status=handoff_status or extract_status_value(body, "Handoff status"),
+        )
+        self.github.edit_pr_body(pr, upsert_status_section(body, status))
+
+    def _pr_status(
+        self,
+        issue: int,
+        phase: str,
+        cycle: int,
+        branch: str,
+        *,
+        plan_summary: str = "",
+        validation_results: dict[str, Any] | None = None,
+        review_summary: str = "",
+        handoff_status: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "issue": issue,
+            "phase": phase,
+            "branch": branch,
+            "plan_summary": plan_summary or self._plan_summary,
+            "validation_results": validation_results,
+            "review_summary": review_summary,
+            "remediation_count": cycle,
+            "cycle": cycle,
+            "handoff_status": handoff_status,
+        }
 
     def _enter_phase(self, issue: int, phase: str, pr: int | None) -> None:
         label = _phase_label(phase)

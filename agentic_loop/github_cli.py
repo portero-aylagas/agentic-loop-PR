@@ -98,6 +98,13 @@ class GitHubCli:
         raw = self._json(["gh", "pr", "view", str(number), "--json", "number,url,headRefName,baseRefName"])
         return PullRequest(int(raw["number"]), str(raw["url"]), str(raw["headRefName"]), str(raw["baseRefName"]))
 
+    def pr_body(self, number: int) -> str:
+        raw = self._json(["gh", "pr", "view", str(number), "--json", "body"])
+        return str(raw.get("body") or "")
+
+    def edit_pr_body(self, number: int, body: str) -> None:
+        self.runner.run(["gh", "pr", "edit", str(number), "--body", body])
+
     def create_pr(self, *, title: str, body: str, head: str, base: str) -> PullRequest:
         result = self.runner.run([
             "gh",

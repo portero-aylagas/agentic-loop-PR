@@ -17,6 +17,9 @@ class FakeGitHub:
         self.issue = Issue(7, "demo", "make a file", "https://example.test/issues/7")
         self.existing_pr = existing_pr
         self.created_prs = []
+        self.pr_bodies = {}
+        if existing_pr is not None:
+            self.pr_bodies[existing_pr.number] = "Existing body"
         self.issue_comments_log = list(issue_comments or [])
         self.pr_comments_log = list(pr_comments or [])
         self.label_results = list(label_results or [])
@@ -35,6 +38,12 @@ class FakeGitHub:
     def pr_comments(self, number):
         return [{"body": body} for _, body in self.pr_comments_log if _ == number]
 
+    def pr_body(self, number):
+        return self.pr_bodies.get(number, "")
+
+    def edit_pr_body(self, number, body):
+        self.pr_bodies[number] = body
+
     def comment_issue(self, number, body):
         self.issue_comments_log.append((number, body))
 
@@ -47,6 +56,7 @@ class FakeGitHub:
     def create_pr(self, *, title, body, head, base):
         pr = PullRequest(11, "https://example.test/pull/11", head, base)
         self.created_prs.append((title, body, head, base))
+        self.pr_bodies[pr.number] = body
         self.label_ops.append(("create_pr", pr.number))
         return pr
 
@@ -350,6 +360,34 @@ def test_pr_reuse_by_branch():
     result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
     assert result.pr == 22
     assert github.created_prs == []
+
+
+def test_created_pr_body_includes_managed_status_section():
+    config = config_without_validation()
+    github = FakeGitHub()
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    body = github.pr_bodies[11]
+    assert "<!-- agentic-loop-status:start -->" in body
+    assert "<!-- agentic-loop-status:end -->" in body
+    assert "- Source issue: #7" in body
+    assert "- Plan summary: create fixture" in body
+    assert "- Automation will not merge." in body
+
+
+def test_pr_body_refresh_preserves_unmanaged_text():
+    config = config_without_validation()
+    existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
+    github = FakeGitHub(existing_pr=existing)
+    github.pr_bodies[22] = "Keep this intro\n\n<!-- agentic-loop-status:start -->\nold\n<!-- agentic-loop-status:end -->\n\nKeep this footer"
+    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    body = github.pr_bodies[22]
+    assert body.startswith("Keep this intro")
+    assert body.rstrip().endswith("Keep this footer")
+    assert body.count("<!-- agentic-loop-status:start -->") == 1
+    assert "- Current phase: human-review" in body
+    assert "- Handoff status: review approved" in body
 
 
 def test_terminal_state_stops_without_force():

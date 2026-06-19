@@ -192,3 +192,22 @@ def test_github_cli_label_helpers_use_non_throwing_edit_commands():
         (["gh", "pr", "edit", "11", "--add-label", "agentic:reviewing"], False),
         (["gh", "pr", "edit", "11", "--remove-label", "agentic:remediating"], False),
     ]
+
+
+def test_github_cli_reads_and_edits_pr_body():
+    calls = []
+
+    class FakeRunner:
+        def run(self, args, *, check=True):
+            calls.append((list(args), check))
+            if args[:3] == ["gh", "pr", "view"]:
+                return type("Result", (), {"returncode": 0, "stdout": '{"body":"hello"}', "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    github = GitHubCli(runner=FakeRunner())
+    assert github.pr_body(11) == "hello"
+    github.edit_pr_body(11, "updated")
+    assert calls == [
+        (["gh", "pr", "view", "11", "--json", "body"], True),
+        (["gh", "pr", "edit", "11", "--body", "updated"], True),
+    ]
