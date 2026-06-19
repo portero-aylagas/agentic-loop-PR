@@ -189,6 +189,8 @@ class Controller:
         history = _review_history(resume.states)
         cycle = resume.next_cycle
         review = resume.review_for_remediation
+        review_invocation_count = _review_invocation_count(resume.states)
+        remediation_attempt_count = _remediation_attempt_count(resume.states)
         validation_results = _latest_validation_results(resume.states)
         validation_cycle: int | None = _latest_validation_cycle(resume.states)
         if review is not None and history:
@@ -203,7 +205,19 @@ class Controller:
                 if validation_failed(validation_results) and cycle >= int(self.config.policy["max_review_cycles"]):
                     findings = [_validation_finding(validation_results)]
                     decision = PolicyDecision("handoff", "validation failed after policy limits")
-                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, decision.kind, decision.reason, validation_results)
+                    self._post_pr_state(
+                        pr.number,
+                        issue.number,
+                        "reviewed",
+                        cycle,
+                        branch,
+                        findings,
+                        decision.kind,
+                        decision.reason,
+                        validation_results,
+                        review_invocation_count=review_invocation_count,
+                        remediation_attempt_count=remediation_attempt_count,
+                    )
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
@@ -211,7 +225,19 @@ class Controller:
                 protected_findings = self._protected_path_findings()
                 if protected_findings:
                     decision = PolicyDecision("handoff", "protected path changed before review")
-                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, protected_findings, decision.kind, decision.reason, validation_results)
+                    self._post_pr_state(
+                        pr.number,
+                        issue.number,
+                        "reviewed",
+                        cycle,
+                        branch,
+                        protected_findings,
+                        decision.kind,
+                        decision.reason,
+                        validation_results,
+                        review_invocation_count=review_invocation_count,
+                        remediation_attempt_count=remediation_attempt_count,
+                    )
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
@@ -219,12 +245,25 @@ class Controller:
                 size_findings = self._diff_size_findings()
                 if size_findings:
                     decision = PolicyDecision("handoff", "worktree diff exceeds policy limits")
-                    self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, size_findings, decision.kind, decision.reason, validation_results)
+                    self._post_pr_state(
+                        pr.number,
+                        issue.number,
+                        "reviewed",
+                        cycle,
+                        branch,
+                        size_findings,
+                        decision.kind,
+                        decision.reason,
+                        validation_results,
+                        review_invocation_count=review_invocation_count,
+                        remediation_attempt_count=remediation_attempt_count,
+                    )
                     self._enter_phase(issue.number, "human-review", pr.number)
                     self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=decision.reason)
                     self.github.comment_pr(pr.number, f"Human handoff required. Reason: {decision.reason}")
                     return RunResult(issue.number, branch, pr.number, decision)
                 review = self._review(issue, pr, branch, cycle, history, validation_results)
+                review_invocation_count += 1
 
             findings = list(review.get("findings", []))
             decision = decide_review(
@@ -247,6 +286,8 @@ class Controller:
                 decision.reason,
                 validation_results,
                 review_summary=str(review.get("summary", "")),
+                review_invocation_count=review_invocation_count,
+                remediation_attempt_count=remediation_attempt_count,
             )
             if decision.kind == "approved":
                 self._enter_phase(issue.number, "human-review", pr.number)
@@ -273,6 +314,7 @@ class Controller:
                     **_base_context(self.config),
                 },
             ).data
+            remediation_attempt_count += 1
             staging_decision = self._stage_commit_and_push(
                 issue=issue.number,
                 branch=branch,
@@ -281,7 +323,19 @@ class Controller:
                 default_message=f"Remediate issue {issue.number}",
             )
             if staging_decision is not None:
-                self._post_pr_state(pr.number, issue.number, "reviewed", cycle, branch, findings, staging_decision.kind, staging_decision.reason, validation_results)
+                self._post_pr_state(
+                    pr.number,
+                    issue.number,
+                    "reviewed",
+                    cycle,
+                    branch,
+                    findings,
+                    staging_decision.kind,
+                    staging_decision.reason,
+                    validation_results,
+                    review_invocation_count=review_invocation_count,
+                    remediation_attempt_count=remediation_attempt_count,
+                )
                 self._enter_phase(issue.number, "human-review", pr.number)
                 self._refresh_pr_status(pr.number, issue.number, "human-review", cycle, branch, validation_results=validation_results, handoff_status=staging_decision.reason)
                 self.github.comment_pr(pr.number, f"Human handoff required. Reason: {staging_decision.reason}")
@@ -290,7 +344,17 @@ class Controller:
             cycle += 1
             validation_results = self._run_validation(pr.number)
             validation_cycle = cycle
-            self._post_pr_state(pr.number, issue.number, "remediated", cycle, branch, findings, validation_results=validation_results)
+            self._post_pr_state(
+                pr.number,
+                issue.number,
+                "remediated",
+                cycle,
+                branch,
+                findings,
+                validation_results=validation_results,
+                review_invocation_count=review_invocation_count,
+                remediation_attempt_count=remediation_attempt_count,
+            )
             review = None
 
     def _resume_context(self, issue_number: int) -> ResumeContext:
@@ -456,7 +520,14 @@ class Controller:
 
     def _post_issue_state(self, issue: int, phase: str, cycle: int, branch: str, pr: int | None) -> None:
         self._enter_phase(issue, phase, pr)
-        state = WorkflowState(issue=issue, phase=phase, cycle=cycle, branch=branch, pr=pr)
+        state = WorkflowState(
+            issue=issue,
+            phase=phase,
+            cycle=cycle,
+            branch=branch,
+            pr=pr,
+            model_provider=self._model_provider_identity(),
+        )
         self.github.comment_issue(issue, _state_comment(f"Agentic workflow: {phase} on `{branch}`.", state))
 
     def _post_pr_state(
@@ -471,6 +542,8 @@ class Controller:
         handoff_reason: str = "",
         validation_results: dict[str, Any] | None = None,
         review_summary: str = "",
+        review_invocation_count: int | None = None,
+        remediation_attempt_count: int | None = None,
     ) -> None:
         self._enter_phase(issue, phase, pr)
         state = WorkflowState(
@@ -483,6 +556,17 @@ class Controller:
             findings=findings,
             validation_results=validation_results,
             handoff_reason=handoff_reason,
+            review_invocation_count=(
+                review_invocation_count
+                if review_invocation_count is not None
+                else _default_review_invocation_count(phase, cycle)
+            ),
+            remediation_attempt_count=(
+                remediation_attempt_count
+                if remediation_attempt_count is not None
+                else _default_remediation_attempt_count(phase, cycle)
+            ),
+            model_provider=self._model_provider_identity(),
         )
         self.github.comment_pr(pr, _state_comment(f"Agentic workflow: {phase} cycle {cycle} on `{branch}` ({status}).", state))
         self._refresh_pr_status(
@@ -543,6 +627,16 @@ class Controller:
             "cycle": cycle,
             "handoff_status": handoff_status,
         }
+
+    def _model_provider_identity(self) -> dict[str, Any]:
+        identity: dict[str, Any] = {"provider": type(self.codex).__name__}
+        executable = getattr(self.codex, "executable", None)
+        model = getattr(self.codex, "model", None)
+        if executable:
+            identity["executable"] = str(executable)
+        if model:
+            identity["model"] = str(model)
+        return identity
 
     def _enter_phase(self, issue: int, phase: str, pr: int | None) -> None:
         label = _phase_label(phase)
@@ -664,6 +758,35 @@ def _latest_validation_cycle(states: list[dict[str, Any]]) -> int | None:
     return _state_cycle(state)
 
 
+def _review_invocation_count(states: list[dict[str, Any]]) -> int:
+    values = [_state_int(state, "review_invocation_count") for state in states]
+    if any(values):
+        return max(values)
+    return len([
+        state for state in states
+        if state.get("phase") == "reviewed" and state.get("findings") is not None
+    ])
+
+
+def _remediation_attempt_count(states: list[dict[str, Any]]) -> int:
+    values = [_state_int(state, "remediation_attempt_count") for state in states]
+    if any(values):
+        return max(values)
+    return max([_state_cycle(state) for state in states if state.get("phase") == "remediated"] or [0])
+
+
+def _default_review_invocation_count(phase: str, cycle: int) -> int:
+    if phase in {"reviewed", "remediated"}:
+        return cycle + 1
+    return cycle
+
+
+def _default_remediation_attempt_count(phase: str, cycle: int) -> int:
+    if phase == "remediated":
+        return cycle
+    return max(cycle, 0)
+
+
 def _validation_finding(validation_results: dict[str, Any] | None) -> dict[str, Any]:
     failed = [
         str(command.get("command", "validation command"))
@@ -681,8 +804,12 @@ def _validation_finding(validation_results: dict[str, Any] | None) -> dict[str, 
 
 
 def _state_cycle(state: dict[str, Any] | None) -> int:
+    return _state_int(state, "cycle")
+
+
+def _state_int(state: dict[str, Any] | None, key: str) -> int:
     try:
-        return int((state or {}).get("cycle", 0))
+        return int((state or {}).get(key, 0))
     except (TypeError, ValueError):
         return 0
 

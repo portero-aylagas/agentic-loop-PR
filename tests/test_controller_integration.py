@@ -653,6 +653,10 @@ def test_validation_results_are_encoded_in_pr_state():
     reviewed = [state for state in states if state.get("phase") == "reviewed"]
     assert reviewed[-1]["validation_results"]["commands"][0]["command"] == "python -m pytest"
     assert reviewed[-1]["validation_results"]["commands"][0]["exit_code"] == 0
+    assert reviewed[-1]["review_invocation_count"] == 1
+    assert reviewed[-1]["remediation_attempt_count"] == 0
+    assert reviewed[-1]["model_provider"] == {"provider": "FakeCodex"}
+    assert reviewed[-1]["timestamp"]
 
 
 def test_failing_validation_hands_off_after_review_policy_limit():
