@@ -12,7 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeGitHub:
-    def __init__(self, existing_pr=None, label_results=None, failed_label_ops=None, issue_comments=None, pr_comments=None):
+    def __init__(
+        self,
+        existing_pr=None,
+        label_results=None,
+        failed_label_ops=None,
+        issue_comments=None,
+        pr_comments=None,
+        issue_labels=None,
+        pr_labels=None,
+    ):
         self.issue = Issue(7, "demo", "make a file", "https://example.test/issues/7")
         self.existing_pr = existing_pr
         self.created_prs = []
@@ -25,6 +34,8 @@ class FakeGitHub:
         self.created_issue_labels = None
         self.failed_label_ops = set(failed_label_ops or [])
         self.label_ops = []
+        self._issue_labels = set(issue_labels or [])
+        self._pr_labels = set(pr_labels or [])
 
     def issue_view(self, number):
         assert number == self.issue.number
@@ -67,21 +78,42 @@ class FakeGitHub:
             return self.label_results.pop(0)
         return True
 
+    def issue_labels(self, number):
+        assert number == self.issue.number
+        self.label_ops.append(("issue_labels", number))
+        return set(self._issue_labels)
+
+    def pr_labels(self, number):
+        self.label_ops.append(("pr_labels", number))
+        return set(self._pr_labels)
+
     def add_issue_label(self, number, label):
         self.label_ops.append(("add_issue", number, label))
-        return ("add_issue", number, label) not in self.failed_label_ops
+        if ("add_issue", number, label) in self.failed_label_ops:
+            return False
+        self._issue_labels.add(label)
+        return True
 
     def remove_issue_label(self, number, label):
         self.label_ops.append(("remove_issue", number, label))
-        return ("remove_issue", number, label) not in self.failed_label_ops
+        if ("remove_issue", number, label) in self.failed_label_ops:
+            return False
+        self._issue_labels.discard(label)
+        return True
 
     def add_pr_label(self, number, label):
         self.label_ops.append(("add_pr", number, label))
-        return ("add_pr", number, label) not in self.failed_label_ops
+        if ("add_pr", number, label) in self.failed_label_ops:
+            return False
+        self._pr_labels.add(label)
+        return True
 
     def remove_pr_label(self, number, label):
         self.label_ops.append(("remove_pr", number, label))
-        return ("remove_pr", number, label) not in self.failed_label_ops
+        if ("remove_pr", number, label) in self.failed_label_ops:
+            return False
+        self._pr_labels.discard(label)
+        return True
 
     def create_issue(self, title, body, labels):
         self.created_issue_labels = labels
@@ -355,7 +387,10 @@ def test_phase_label_creation_failure_posts_visible_comment_and_continues():
 
 def test_phase_label_remove_failure_posts_visible_comment_and_continues():
     config = config_without_validation()
-    github = FakeGitHub(failed_label_ops={("remove_issue", 7, "agentic:implementing")})
+    github = FakeGitHub(
+        failed_label_ops={("remove_issue", 7, "agentic:implementing")},
+        issue_labels={"agentic:implementing"},
+    )
     codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
     result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.decision.kind == "approved"
@@ -373,6 +408,25 @@ def test_phase_label_success_path_does_not_post_label_failure_comment():
     result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert not any("label update failed" in body.lower() for _, body in [*github.issue_comments_log, *github.pr_comments_log])
+
+
+def test_absent_phase_labels_are_not_removed_or_reported():
+    config = config_without_validation()
+    github = FakeGitHub(failed_label_ops={("remove_issue", 7, "agentic:remediating")})
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert ("remove_issue", 7, "agentic:remediating") not in github.label_ops
+    assert not any("agentic:remediating" in body and "label update failed" in body.lower() for _, body in github.issue_comments_log)
+
+
+def test_present_phase_labels_are_removed_before_new_phase_label():
+    config = config_without_validation()
+    github = FakeGitHub(issue_labels={"agentic:reviewing"})
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
+    assert result.decision.kind == "approved"
+    assert ("remove_issue", 7, "agentic:reviewing") in github.label_ops
 
 
 def test_failed_phase_label_is_applied_when_controller_errors_before_pr():
@@ -580,6 +634,39 @@ def test_reported_only_files_are_staged_and_committed():
     assert result.decision.kind == "approved"
     assert git.staged_paths == [(worktree, ["tests/agentic_demo/sample.txt"])]
     assert git.commits == [(worktree, "Implement demo fixture")]
+
+
+def test_reported_directory_stages_dirty_children():
+    config = config_without_validation()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[StatusFile("tests/agentic_demo/sample.txt", "?", "?")])
+    codex = CustomFileProvider(
+        [{ "status": "approved", "summary": "ok", "findings": [] }],
+        implementation_files=["tests/agentic_demo/"],
+    )
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
+    worktree = ROOT / ".worktrees" / "agentic-issue-7"
+    assert result.decision.kind == "approved"
+    assert git.staged_paths == [(worktree, ["tests/agentic_demo/sample.txt"])]
+    assert git.commits == [(worktree, "Implement demo fixture")]
+
+
+def test_reported_directory_does_not_cover_unreported_sibling_file():
+    config = config_without_validation()
+    github = FakeGitHub()
+    git = FakeGit(status_files=[
+        StatusFile("tests/agentic_demo/sample.txt", "?", "?"),
+        StatusFile("tests/test_agentic_demo_fixture.py", "?", "?"),
+    ])
+    codex = CustomFileProvider(
+        [{ "status": "approved", "summary": "ok", "findings": [] }],
+        implementation_files=["tests/agentic_demo/"],
+    )
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
+    assert result.decision.kind == "handoff"
+    assert result.decision.reason == "unexpected dirty files"
+    assert git.staged_paths == []
+    assert any("unexpected dirty files: tests/test_agentic_demo_fixture.py" in body for _, body in github.issue_comments_log)
 
 
 def test_unexpected_dirty_files_hand_off_without_commit():

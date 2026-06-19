@@ -42,6 +42,14 @@ class GitHubCli:
         comments = raw.get("comments", [])
         return comments if isinstance(comments, list) else []
 
+    def issue_labels(self, number: int) -> set[str]:
+        raw = self._json(["gh", "issue", "view", str(number), "--json", "labels"])
+        return _label_names(raw)
+
+    def pr_labels(self, number: int) -> set[str]:
+        raw = self._json(["gh", "pr", "view", str(number), "--json", "labels"])
+        return _label_names(raw)
+
     def comment_issue(self, number: int, body: str) -> None:
         self.runner.run(["gh", "issue", "comment", str(number), "--body", body])
 
@@ -141,3 +149,14 @@ def _number_from_url(text: str) -> int:
     if not match:
         raise ValueError(f"could not parse GitHub number from output: {text.strip()}")
     return int(match.group(1))
+
+
+def _label_names(raw: Any) -> set[str]:
+    labels = raw.get("labels", []) if isinstance(raw, dict) else []
+    names: set[str] = set()
+    if not isinstance(labels, list):
+        return names
+    for label in labels:
+        if isinstance(label, dict) and isinstance(label.get("name"), str):
+            names.add(label["name"])
+    return names

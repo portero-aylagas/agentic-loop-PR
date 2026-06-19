@@ -143,7 +143,7 @@ def test_git_client_prepares_new_issue_worktree_from_remote_base(tmp_path):
     assert worktree == expected
     assert (["git", "fetch", "upstream", "trunk"], str(root), True) in calls
     assert (["git", "worktree", "add", str(expected), "-b", "agentic/issue-7", "upstream/trunk"], str(root), True) in calls
-    assert (["git", "status", "--porcelain"], str(expected), True) in calls
+    assert (["git", "status", "--porcelain", "--untracked-files=all"], str(expected), True) in calls
 
 
 def test_git_client_reuses_clean_issue_worktree_on_expected_branch(tmp_path):
@@ -170,7 +170,7 @@ def test_git_client_reuses_clean_issue_worktree_on_expected_branch(tmp_path):
     assert worktree == expected
     assert not any(call[0][:3] == ["git", "worktree", "add"] for call in calls)
     assert (["git", "rev-parse", "--is-inside-work-tree"], str(expected), True) in calls
-    assert (["git", "status", "--porcelain"], str(expected), True) in calls
+    assert (["git", "status", "--porcelain", "--untracked-files=all"], str(expected), True) in calls
 
 
 def test_github_cli_label_helpers_use_non_throwing_edit_commands():
@@ -211,6 +211,31 @@ def test_github_cli_label_create_already_exists_is_success():
             return type("Result", (), {"returncode": 1, "stdout": "", "stderr": "already exists"})()
 
     assert GitHubCli(runner=FakeRunner()).ensure_label("agentic:planning")
+
+
+def test_github_cli_reads_issue_and_pr_label_names():
+    calls = []
+
+    class FakeRunner:
+        def run(self, args, *, check=True):
+            calls.append((list(args), check))
+            return type(
+                "Result",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": '{"labels":[{"name":"agentic:planning"},{"name":"agentic-demo"},{"color":"fff"}]}',
+                    "stderr": "",
+                },
+            )()
+
+    github = GitHubCli(runner=FakeRunner())
+    assert github.issue_labels(7) == {"agentic:planning", "agentic-demo"}
+    assert github.pr_labels(11) == {"agentic:planning", "agentic-demo"}
+    assert calls == [
+        (["gh", "issue", "view", "7", "--json", "labels"], True),
+        (["gh", "pr", "view", "11", "--json", "labels"], True),
+    ]
 
 
 def test_github_cli_reads_and_edits_pr_body():
