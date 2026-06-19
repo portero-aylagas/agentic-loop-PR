@@ -474,25 +474,25 @@ class Controller:
             self.git.push_branch(branch)
             return None
 
-        status_by_path = {item.path: item for item in before}
-        unexpected = sorted(item.path for item in before if item.path not in files)
+        reported_dirty_paths = _reported_dirty_paths(files, before)
+        unexpected = sorted(item.path for item in before if item.path not in reported_dirty_paths)
         if unexpected:
             return self._staging_handoff(issue, role, f"unexpected dirty files: {', '.join(unexpected)}", "unexpected dirty files")
 
-        unreconciled = sorted(path for path in files if path not in status_by_path)
+        unreconciled = sorted(path for path in files if not _reported_path_has_dirty_match(path, before))
         if unreconciled:
             return self._staging_handoff(issue, role, f"reported files are not dirty: {', '.join(unreconciled)}")
 
-        self.git.stage_paths(files)
+        self.git.stage_paths(reported_dirty_paths)
         after = self.git.status_files()
-        unstaged_reported = sorted(item.path for item in after if item.path in files and item.worktree_status != " ")
+        unstaged_reported = sorted(item.path for item in after if item.path in reported_dirty_paths and item.worktree_status != " ")
         if unstaged_reported:
             return self._staging_handoff(issue, role, f"reported files could not be fully staged: {', '.join(unstaged_reported)}")
-        unexpected_after = sorted(item.path for item in after if item.path not in files)
+        unexpected_after = sorted(item.path for item in after if item.path not in reported_dirty_paths)
         if unexpected_after:
             return self._staging_handoff(issue, role, f"unexpected dirty files: {', '.join(unexpected_after)}", "unexpected dirty files")
 
-        if not any(item.path in files and item.index_status != " " for item in after):
+        if not any(item.path in reported_dirty_paths and item.index_status != " " for item in after):
             return None
 
         self.git.commit_staged(str(output.get("commit_message", default_message)))
@@ -649,10 +649,13 @@ class Controller:
             self._apply_phase_label(target, number, label)
 
     def _apply_phase_label(self, target: str, number: int, current_label: str) -> None:
+        existing_labels = self._current_labels(target, number)
         if not self.github.ensure_label(current_label, description="Agentic workflow phase"):
             self._comment_label_failure(target, number, "create", current_label)
         for label in PHASE_LABELS:
             if label == current_label:
+                continue
+            if label not in existing_labels:
                 continue
             if not self._remove_label(target, number, label):
                 self._comment_label_failure(target, number, "remove", label)
@@ -668,6 +671,11 @@ class Controller:
         if target == "issue":
             return self.github.remove_issue_label(number, label)
         return self.github.remove_pr_label(number, label)
+
+    def _current_labels(self, target: str, number: int) -> set[str]:
+        if target == "issue":
+            return self.github.issue_labels(number)
+        return self.github.pr_labels(number)
 
     def _comment_label_failure(self, target: str, number: int, action: str, label: str) -> None:
         body = (
@@ -708,6 +716,31 @@ def _reported_files(output: dict[str, Any]) -> tuple[list[str], str | None]:
             return [], f"Codex output reported an unsafe changed file path: {item}"
         files.append(path)
     return sorted(set(files)), None
+
+
+def _reported_dirty_paths(reported: list[str], dirty: list[Any]) -> list[str]:
+    matched = [
+        item.path
+        for item in dirty
+        if any(_reported_path_matches_dirty_path(path, item.path) for path in reported)
+    ]
+    return sorted(set(matched))
+
+
+def _reported_path_has_dirty_match(path: str, dirty: list[Any]) -> bool:
+    return any(_reported_path_matches_dirty_path(path, item.path) for item in dirty)
+
+
+def _reported_path_matches_dirty_path(reported: str, dirty_path: str) -> bool:
+    reported = reported.strip().replace("\\", "/")
+    dirty_path = dirty_path.strip().replace("\\", "/")
+    if reported == dirty_path:
+        return True
+    if reported.endswith("/") and dirty_path.startswith(reported):
+        return True
+    if dirty_path.endswith("/") and reported.startswith(dirty_path):
+        return True
+    return False
 
 
 def _state_comment(message: str, state: WorkflowState) -> str:

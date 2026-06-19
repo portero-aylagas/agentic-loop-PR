@@ -105,10 +105,10 @@ class GitClient:
         return DiffStats(changed_files=changed_files, diff_lines=parse_numstat_lines(result.stdout))
 
     def has_changes(self) -> bool:
-        return bool(self.runner.run(["git", "status", "--porcelain"], cwd=self.cwd).stdout.strip())
+        return bool(self.runner.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=self.cwd).stdout.strip())
 
     def status_files(self) -> list[StatusFile]:
-        result = self.runner.run(["git", "status", "--porcelain"], cwd=self.cwd)
+        result = self.runner.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=self.cwd)
         return parse_status(result.stdout)
 
     def stage_paths(self, paths: list[str]) -> None:
