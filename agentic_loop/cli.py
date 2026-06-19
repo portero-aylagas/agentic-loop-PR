@@ -8,6 +8,7 @@ from .config import ConfigError, validate_all
 from .controller import Controller
 from .git_client import GitClient
 from .github_cli import GitHubCli
+from .roles import automated_comment
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,9 +69,12 @@ def seed_demo(config, issue_file: Path, github=None):
     for label in failed_labels:
         github.comment_issue(
             issue.number,
-            (
-                f"Label update failed: could not create label `{label}` for seeded demo issue #{issue.number}. "
-                "Manual action: create the label in GitHub and add it to this issue if needed."
+            automated_comment(
+                "orchestrator",
+                (
+                    f"Label update failed: could not create label `{label}` for seeded demo issue #{issue.number}. "
+                    "Manual action: create the label in GitHub and add it to this issue if needed."
+                ),
             ),
         )
     return issue
