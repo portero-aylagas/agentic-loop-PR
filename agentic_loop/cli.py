@@ -81,7 +81,7 @@ def run_controller(config, issue_number: int, *, force: bool = False):
         config=config,
         github=GitHubCli(),
         git=GitClient(cwd=str(config.repository_root), remote=config.remote),
-        codex=CodexProvider(
+        provider=CodexProvider(
             executable=config.codex_executable,
             model=config.codex_model,
             extra_args=config.codex_extra_args,

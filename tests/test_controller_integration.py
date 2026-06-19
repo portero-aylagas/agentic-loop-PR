@@ -1,12 +1,11 @@
 from pathlib import Path
-from types import SimpleNamespace
-
 from agentic_loop.cli import _resolve_issue_file, seed_demo
 from agentic_loop.command import CommandResult
 from agentic_loop.config import LoopConfig, validate_all
 from agentic_loop.controller import Controller
 from agentic_loop.git_client import DiffFile, DiffStats, StatusFile
 from agentic_loop.github_cli import Issue, PullRequest
+from agentic_loop.provider import RoleResult
 from agentic_loop.state import WorkflowState, decode_states, encode_state
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,7 +179,7 @@ class FakeGit:
         self.pushes.append((self.cwd, branch))
 
 
-class FakeCodex:
+class FakeProvider:
     def __init__(self, reviews, cwd=ROOT):
         self.reviews = list(reviews)
         self.cwd = Path(cwd)
@@ -209,10 +208,10 @@ class FakeCodex:
             data = {"summary": "fixed", "files_changed": ["tests/agentic_demo/sample.txt"], "commit_message": "Remediate demo fixture"}
         else:
             raise AssertionError(role)
-        return SimpleNamespace(data=data)
+        return RoleResult(role=role, data=data)
 
 
-class CustomFileCodex(FakeCodex):
+class CustomFileProvider(FakeProvider):
     def __init__(self, reviews, *, implementation_files, remediation_files=None, cwd=ROOT):
         super().__init__(reviews, cwd=cwd)
         self.implementation_files = implementation_files
@@ -285,11 +284,11 @@ def test_blocking_finding_remediation_rereview_handoff():
     config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit()
-    codex = FakeCodex([
+    codex = FakeProvider([
         {"status": "blocking", "summary": "missing beta", "findings": [{"title": "missing beta", "path": "tests/agentic_demo/sample.txt", "message": "Add beta", "severity": "medium", "conflicting": False}]},
         {"status": "approved", "summary": "ok", "findings": []},
     ])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator", "reviewer"]
     assert all(payload["base_ref"] == "main" for payload in codex.payloads)
@@ -318,8 +317,8 @@ def test_blocking_finding_remediation_rereview_handoff():
 def test_phase_labels_update_issue_only_before_pr_exists():
     config = config_without_validation()
     github = FakeGitHub()
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     create_pr_index = github.label_ops.index(("create_pr", 11))
     before_pr_ops = github.label_ops[:create_pr_index]
     assert ("add_issue", 7, "agentic:planning") in before_pr_ops
@@ -330,8 +329,8 @@ def test_phase_labels_update_issue_only_before_pr_exists():
 def test_phase_label_permission_failure_posts_visible_comment():
     config = config_without_validation()
     github = FakeGitHub(failed_label_ops={("add_issue", 7, "agentic:planning")})
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert any(
         "label update failed" in body
@@ -344,8 +343,8 @@ def test_phase_label_permission_failure_posts_visible_comment():
 def test_phase_label_creation_failure_posts_visible_comment_and_continues():
     config = config_without_validation()
     github = FakeGitHub(failed_label_ops={("ensure", "agentic:planning")})
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert any(
         "could not create label `agentic:planning` on issue #7" in body
@@ -357,8 +356,8 @@ def test_phase_label_creation_failure_posts_visible_comment_and_continues():
 def test_phase_label_remove_failure_posts_visible_comment_and_continues():
     config = config_without_validation()
     github = FakeGitHub(failed_label_ops={("remove_issue", 7, "agentic:implementing")})
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert any(
         "could not remove label `agentic:implementing` on issue #7" in body
@@ -370,21 +369,21 @@ def test_phase_label_remove_failure_posts_visible_comment_and_continues():
 def test_phase_label_success_path_does_not_post_label_failure_comment():
     config = config_without_validation()
     github = FakeGitHub()
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert not any("label update failed" in body.lower() for _, body in [*github.issue_comments_log, *github.pr_comments_log])
 
 
 def test_failed_phase_label_is_applied_when_controller_errors_before_pr():
-    class FailingCodex(FakeCodex):
+    class FailingProvider(FakeProvider):
         def run_role(self, *, role, prompt_path, schema_path, payload):
             raise RuntimeError("planner failed")
 
     config = config_without_validation()
     github = FakeGitHub()
     try:
-        Controller(config=config, github=github, git=FakeGit(), codex=FailingCodex([])).run(7)
+        Controller(config=config, github=github, git=FakeGit(), provider=FailingProvider([])).run(7)
     except RuntimeError as exc:
         assert "planner failed" in str(exc)
     else:
@@ -397,8 +396,8 @@ def test_pr_reuse_by_branch():
     config = config_without_validation()
     existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
     github = FakeGitHub(existing_pr=existing)
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.pr == 22
     assert github.created_prs == []
 
@@ -406,8 +405,8 @@ def test_pr_reuse_by_branch():
 def test_created_pr_body_includes_managed_status_section():
     config = config_without_validation()
     github = FakeGitHub()
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     body = github.pr_bodies[11]
     assert "<!-- agentic-loop-status:start -->" in body
     assert "<!-- agentic-loop-status:end -->" in body
@@ -421,8 +420,8 @@ def test_pr_body_refresh_preserves_unmanaged_text():
     existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
     github = FakeGitHub(existing_pr=existing)
     github.pr_bodies[22] = "Keep this intro\n\n<!-- agentic-loop-status:start -->\nold\n<!-- agentic-loop-status:end -->\n\nKeep this footer"
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     body = github.pr_bodies[22]
     assert body.startswith("Keep this intro")
     assert body.rstrip().endswith("Keep this footer")
@@ -437,8 +436,8 @@ def test_terminal_state_stops_without_force():
     state = WorkflowState(issue=7, phase="human-review", cycle=1, branch="agentic/issue-7", pr=22)
     github = FakeGitHub(existing_pr=existing, issue_comments=[(7, encode_state(state))])
     git = FakeGit()
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.pr == 22
     assert result.decision.kind == "handoff"
     assert "already terminal" in result.decision.reason
@@ -451,8 +450,8 @@ def test_force_ignores_terminal_state_and_runs():
     existing = PullRequest(22, "https://example.test/pull/22", "agentic/issue-7", "main")
     state = WorkflowState(issue=7, phase="failed", cycle=1, branch="agentic/issue-7", pr=22)
     github = FakeGitHub(existing_pr=existing, issue_comments=[(7, encode_state(state))])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7, force=True)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7, force=True)
     assert result.pr == 22
     assert codex.roles == ["planner", "implementer", "reviewer"]
     assert github.created_prs == []
@@ -464,8 +463,8 @@ def test_reviewed_state_resumes_at_remediation():
     findings = [{"title": "missing beta", "path": "tests/agentic_demo/sample.txt", "message": "Add beta", "severity": "medium", "conflicting": False}]
     state = WorkflowState(issue=7, phase="reviewed", cycle=0, branch="agentic/issue-7", pr=22, status="continue", findings=findings)
     github = FakeGitHub(existing_pr=existing, pr_comments=[(22, encode_state(state))])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.pr == 22
     assert codex.roles == ["remediator", "reviewer"]
     assert github.created_prs == []
@@ -474,9 +473,9 @@ def test_reviewed_state_resumes_at_remediation():
 def test_dirty_target_worktree_aborts_before_github_mutation():
     config = config_without_validation()
     github = FakeGitHub()
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
     try:
-        Controller(config=config, github=github, git=FakeGit(dirty=True), codex=codex).run(7)
+        Controller(config=config, github=github, git=FakeGit(dirty=True), provider=codex).run(7)
     except RuntimeError as exc:
         assert "uncommitted changes" in str(exc)
     else:
@@ -490,8 +489,8 @@ def test_protected_path_change_hands_off_before_reviewer():
     config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit(changed_files=[DiffFile("agentic_loop_assets/schemas/review.schema.json", "M")])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "protected path changed before review"
     assert codex.roles == ["planner", "implementer"]
@@ -505,11 +504,11 @@ def test_protected_path_change_after_remediation_hands_off_before_rereview():
         [],
         [DiffFile("agentic_loop_assets/schemas/review.schema.json", "M")],
     ])
-    codex = FakeCodex([
+    codex = FakeProvider([
         {"status": "blocking", "summary": "bad revert", "findings": [{"title": "Remove unrelated changes", "path": "agentic-loop.yaml", "message": "Restore unrelated files from the base branch.", "severity": "medium", "conflicting": False}]},
         {"status": "approved", "summary": "ok", "findings": []},
     ])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "protected path changed before review"
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator"]
@@ -519,8 +518,8 @@ def test_diff_size_within_policy_allows_review():
     config = config_with_policy(max_changed_files=2, max_diff_lines=10)
     github = FakeGitHub()
     git = FakeGit(changed_files=[DiffFile("tests/agentic_demo/sample.txt", "M")], diff_lines=7)
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert codex.roles == ["planner", "implementer", "reviewer"]
 
@@ -532,8 +531,8 @@ def test_diff_size_too_many_files_hands_off_before_reviewer():
         DiffFile("tests/agentic_demo/one.txt", "M"),
         DiffFile("tests/agentic_demo/two.txt", "A"),
     ], diff_lines=5)
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "worktree diff exceeds policy limits"
     assert codex.roles == ["planner", "implementer"]
@@ -546,8 +545,8 @@ def test_diff_size_too_many_lines_hands_off_before_reviewer():
     config = config_with_policy(max_changed_files=10, max_diff_lines=5)
     github = FakeGitHub()
     git = FakeGit(changed_files=[DiffFile("tests/agentic_demo/sample.txt", "M")], diff_lines=6)
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "worktree diff exceeds policy limits"
     assert codex.roles == ["planner", "implementer"]
@@ -565,8 +564,8 @@ def test_absent_diff_size_policy_defaults_do_not_limit():
         DiffFile(f"tests/agentic_demo/{index}.txt", "A")
         for index in range(30)
     ], diff_lines=2000)
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert codex.roles == ["planner", "implementer", "reviewer"]
 
@@ -575,8 +574,8 @@ def test_reported_only_files_are_staged_and_committed():
     config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit(status_files=[StatusFile("tests/agentic_demo/sample.txt", " ", "M")])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     worktree = ROOT / ".worktrees" / "agentic-issue-7"
     assert result.decision.kind == "approved"
     assert git.staged_paths == [(worktree, ["tests/agentic_demo/sample.txt"])]
@@ -590,8 +589,8 @@ def test_unexpected_dirty_files_hand_off_without_commit():
         StatusFile("tests/agentic_demo/sample.txt", " ", "M"),
         StatusFile("README.md", " ", "M"),
     ])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "unexpected dirty files"
     assert git.staged_paths == []
@@ -603,8 +602,8 @@ def test_deleted_reported_file_is_staged_and_committed():
     config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit(status_files=[StatusFile("tests/agentic_demo/sample.txt", " ", "D")])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     worktree = ROOT / ".worktrees" / "agentic-issue-7"
     assert result.decision.kind == "approved"
     assert git.staged_paths == [(worktree, ["tests/agentic_demo/sample.txt"])]
@@ -615,8 +614,8 @@ def test_no_change_output_skips_commit_but_pushes_branch():
     config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit(status_files=[])
-    codex = CustomFileCodex([{ "status": "approved", "summary": "ok", "findings": [] }], implementation_files=[])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = CustomFileProvider([{ "status": "approved", "summary": "ok", "findings": [] }], implementation_files=[])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     worktree = ROOT / ".worktrees" / "agentic-issue-7"
     assert result.decision.kind == "approved"
     assert git.staged_paths == []
@@ -628,8 +627,8 @@ def test_reported_file_not_in_git_status_hands_off():
     config = config_without_validation()
     github = FakeGitHub()
     git = FakeGit(status_files=[])
-    codex = CustomFileCodex([{ "status": "approved", "summary": "ok", "findings": [] }], implementation_files=["tests/agentic_demo/sample.txt"])
-    result = Controller(config=config, github=github, git=git, codex=codex).run(7)
+    codex = CustomFileProvider([{ "status": "approved", "summary": "ok", "findings": [] }], implementation_files=["tests/agentic_demo/sample.txt"])
+    result = Controller(config=config, github=github, git=git, provider=codex).run(7)
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "reported files are not dirty: tests/agentic_demo/sample.txt"
     assert git.commits == []
@@ -639,8 +638,8 @@ def test_validation_success_posts_comment_and_reaches_reviewer():
     config = config_with_validation(["python -m pytest"])
     github = FakeGitHub()
     runner = FakeValidationRunner([{"returncode": 0, "stdout": "ok\n"}])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex, validation_runner=runner).run(7)
     worktree = ROOT / ".worktrees" / "agentic-issue-7"
     assert result.decision.kind == "approved"
     assert runner.calls == [(["python", "-m", "pytest"], str(worktree), False)]
@@ -657,11 +656,11 @@ def test_validation_failure_is_included_in_reviewer_and_remediator_payloads():
         {"returncode": 1, "stdout": "failed\n", "stderr": "boom\n"},
         {"returncode": 0, "stdout": "fixed\n"},
     ])
-    codex = FakeCodex([
+    codex = FakeProvider([
         {"status": "blocking", "summary": "tests fail", "findings": [{"title": "fix tests", "path": "tests/test_demo.py", "message": "Make validation pass.", "severity": "medium", "conflicting": False}]},
         {"status": "approved", "summary": "ok", "findings": []},
     ])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex, validation_runner=runner).run(7)
     assert result.decision.kind == "approved"
     reviewer_payload = codex.payloads[codex.roles.index("reviewer")]
     remediator_payload = codex.payloads[codex.roles.index("remediator")]
@@ -674,8 +673,8 @@ def test_validation_failure_is_included_in_reviewer_and_remediator_payloads():
 def test_validation_skips_when_commands_absent():
     config = config_without_validation()
     github = FakeGitHub()
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex).run(7)
     assert result.decision.kind == "approved"
     assert not any("Validation " in body for _, body in github.pr_comments_log)
     reviewer_payload = codex.payloads[codex.roles.index("reviewer")]
@@ -686,8 +685,8 @@ def test_validation_results_are_encoded_in_pr_state():
     config = config_with_validation(["python -m pytest"])
     github = FakeGitHub()
     runner = FakeValidationRunner([{"returncode": 0, "stdout": "ok\n"}])
-    codex = FakeCodex([{ "status": "approved", "summary": "ok", "findings": [] }])
-    Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    codex = FakeProvider([{ "status": "approved", "summary": "ok", "findings": [] }])
+    Controller(config=config, github=github, git=FakeGit(), provider=codex, validation_runner=runner).run(7)
     states = []
     for _, body in github.pr_comments_log:
         states.extend(decode_states(body))
@@ -696,7 +695,7 @@ def test_validation_results_are_encoded_in_pr_state():
     assert reviewed[-1]["validation_results"]["commands"][0]["exit_code"] == 0
     assert reviewed[-1]["review_invocation_count"] == 1
     assert reviewed[-1]["remediation_attempt_count"] == 0
-    assert reviewed[-1]["model_provider"] == {"provider": "FakeCodex"}
+    assert reviewed[-1]["model_provider"] == {"provider": "FakeProvider"}
     assert reviewed[-1]["timestamp"]
 
 
@@ -707,11 +706,11 @@ def test_failing_validation_hands_off_after_review_policy_limit():
         {"returncode": 1, "stderr": "first failure\n"},
         {"returncode": 1, "stderr": "still failing\n"},
     ])
-    codex = FakeCodex([
+    codex = FakeProvider([
         {"status": "blocking", "summary": "tests fail", "findings": [{"title": "fix tests", "path": "tests/test_demo.py", "message": "Make validation pass.", "severity": "medium", "conflicting": False}]},
         {"status": "approved", "summary": "ok", "findings": []},
     ])
-    result = Controller(config=config, github=github, git=FakeGit(), codex=codex, validation_runner=runner).run(7)
+    result = Controller(config=config, github=github, git=FakeGit(), provider=codex, validation_runner=runner).run(7)
     assert result.decision.kind == "handoff"
     assert result.decision.reason == "validation failed after policy limits"
     assert codex.roles == ["planner", "implementer", "reviewer", "remediator"]
@@ -734,3 +733,4 @@ def test_issue_file_resolves_relative_to_repository_root():
     config = config_without_validation()
     issue_file = _resolve_issue_file(config, Path("demo/issues/isolated_text_fixture.md"))
     assert issue_file == ROOT / "demo/issues/isolated_text_fixture.md"
+

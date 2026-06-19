@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .codex_provider import CodexProvider
 from .command import CommandRunner
 from .config import LoopConfig, prompt_path, schema_path
 from .git_client import GitClient
 from .github_cli import GitHubCli, Issue, PullRequest
 from .policy import PolicyDecision, decide_review, protected_path_matches
+from .provider import RoleProvider
 from .pr_status import extract_status_value, upsert_status_section
 from .state import WorkflowState, decode_states, encode_state, newest_state
 from .validation import run_validation_commands, validation_comment, validation_failed
@@ -97,13 +97,13 @@ class Controller:
         config: LoopConfig,
         github: GitHubCli,
         git: GitClient,
-        codex: CodexProvider,
+        provider: RoleProvider,
         validation_runner: CommandRunner | None = None,
     ):
         self.config = config
         self.github = github
         self.git = git
-        self.codex = codex
+        self.provider = provider
         self.validation_runner = validation_runner
         self._plan_summary = ""
 
@@ -126,7 +126,7 @@ class Controller:
             repo_root=self.config.repository_root,
         )
         self.git = self.git.with_cwd(worktree)
-        self.codex = self.codex.with_cwd(worktree)
+        self.provider = self.provider.with_cwd(worktree)
         issue = self.github.issue_view(issue_number)
         try:
             base_context = _base_context(self.config)
@@ -158,7 +158,7 @@ class Controller:
 
     def _plan_implement_and_open_pr(self, issue: Issue, branch: str, base_context: dict[str, str]) -> tuple[PullRequest | None, PolicyDecision | None]:
         self._post_issue_state(issue.number, "planning", 0, branch, None)
-        plan = self.codex.run_role(
+        plan = self.provider.run_role(
             role="planner",
             prompt_path=prompt_path(self.config, "planner"),
             schema_path=schema_path(self.config, "plan"),
@@ -167,7 +167,7 @@ class Controller:
         self._plan_summary = str(plan.get("summary", ""))
         self._post_issue_state(issue.number, "implementing", 0, branch, None)
 
-        implementation = self.codex.run_role(
+        implementation = self.provider.run_role(
             role="implementer",
             prompt_path=prompt_path(self.config, "implementer"),
             schema_path=schema_path(self.config, "implementation"),
@@ -301,7 +301,7 @@ class Controller:
                 return RunResult(issue.number, branch, pr.number, decision)
 
             self._enter_phase(issue.number, "remediating", pr.number)
-            remediation = self.codex.run_role(
+            remediation = self.provider.run_role(
                 role="remediator",
                 prompt_path=prompt_path(self.config, "remediator"),
                 schema_path=schema_path(self.config, "remediation"),
@@ -401,7 +401,7 @@ class Controller:
         if synthetic.get("enabled"):
             findings = list(synthetic.get("findings", []))
             return {"status": "blocking" if findings else "approved", "summary": "synthetic review", "findings": findings}
-        return self.codex.run_role(
+        return self.provider.run_role(
             role="reviewer",
             prompt_path=prompt_path(self.config, "reviewer"),
             schema_path=schema_path(self.config, "review"),
@@ -629,9 +629,9 @@ class Controller:
         }
 
     def _model_provider_identity(self) -> dict[str, Any]:
-        identity: dict[str, Any] = {"provider": type(self.codex).__name__}
-        executable = getattr(self.codex, "executable", None)
-        model = getattr(self.codex, "model", None)
+        identity: dict[str, Any] = {"provider": type(self.provider).__name__}
+        executable = getattr(self.provider, "executable", None)
+        model = getattr(self.provider, "model", None)
         if executable:
             identity["executable"] = str(executable)
         if model:

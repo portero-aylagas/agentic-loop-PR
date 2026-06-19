@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import json
@@ -10,12 +9,7 @@ from jsonschema import Draft202012Validator
 
 from .command import CommandRunner
 from .config import load_schema
-
-
-@dataclass(frozen=True)
-class RoleResult:
-    role: str
-    data: dict[str, Any]
+from .provider import RoleResult
 
 
 class CodexProvider:
