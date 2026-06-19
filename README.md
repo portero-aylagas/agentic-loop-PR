@@ -143,6 +143,12 @@ Expected validation output:
 validation ok
 ```
 
+## Hosted Validation
+
+The GitHub Actions workflow in `.github/workflows/validate.yml` is validation-only. It runs on pull requests and manual dispatch, installs the package with test dependencies, runs `python -m agentic_loop validate`, and runs `python -m pytest`.
+
+The hosted workflow must not run `agentic-loop run` or `seed-demo`, use Codex credentials, create issues, create branches, add labels, post comments, or open PRs.
+
 ## Run The Demo In This Repository
 
 First push this repository to GitHub and confirm `repository.remote` points at that repository.
